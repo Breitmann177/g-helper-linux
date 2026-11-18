@@ -21,7 +21,6 @@ from gi.repository import GLib
 ARMOURY = Path("/sys/class/firmware-attributes/asus-armoury/attributes")
 NB_WMI = Path("/sys/devices/platform/asus-nb-wmi")
 HELPER_INSTALLED = Path("/usr/libexec/g-helper-linux/ghelper-helper")
-HELPER_SOURCE = Path(__file__).resolve().parent.parent / "helper" / "ghelper-helper"
 
 FAN_INDEX = {"cpu": 1, "gpu": 2, "mid": 3}
 
@@ -383,7 +382,9 @@ class RootHelper:
 
     @property
     def path(self):
-        return HELPER_INSTALLED if HELPER_INSTALLED.exists() else HELPER_SOURCE
+        # Nur den root-eigenen Helfer starten – nie eine vom Nutzer beschreibbare Kopie
+        # aus dem Quellordner (die könnte jedes Programm des Nutzers verändern).
+        return HELPER_INSTALLED
 
     @property
     def installed(self):
@@ -408,6 +409,8 @@ class RootHelper:
         if self.dry_run:
             print("[helper:dry-run]", json.dumps(ops, ensure_ascii=False))
             return [{"op": o.get("op"), "ok": True, "msg": "dry-run"} for o in ops]
+        if not self.installed:
+            return [{"op": o.get("op"), "ok": False, "msg": "Helfer nicht installiert (install.sh)"} for o in ops]
         cmd = ["pkexec", str(self.path)]
         try:
             r = subprocess.run(cmd, input=json.dumps({"ops": ops}), capture_output=True, text=True, timeout=60)

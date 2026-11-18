@@ -38,7 +38,8 @@ ARMOURY_WHITELIST = {
     "nv_temp_target": (60, 90),
     "nv_tgp": (10, 250),
     "dgpu_disable": (0, 1),
-    "gpu_mux_mode": (0, 1),
+    # gpu_mux_mode absichtlich NICHT: MUX auf dGPU ohne NVIDIA-Treiber = schwarzer Bildschirm
+    # nach dem Neustart. Den MUX schaltet nur supergfxctl (prüft den Treiber selbst).
     "panel_overdrive": (0, 1),
     "boot_sound": (0, 1),
 }
@@ -197,6 +198,10 @@ def op_armoury(a):
     if name not in ARMOURY_WHITELIST:
         raise OpError(f"Attribut {name!r} nicht erlaubt")
     lo, hi = ARMOURY_WHITELIST[name]
+    if name == "dgpu_disable" and str(a.get("value")) == "1":
+        mux = _read(os.path.join(ARMOURY, "gpu_mux_mode", "current_value")) or _read(os.path.join(NB_WMI, "gpu_mux_mode"))
+        if mux == "0":
+            raise OpError("dGPU kann nicht abgeschaltet werden, solange der MUX auf dGPU steht")
     d = os.path.join(ARMOURY, name)
     if os.path.isdir(d):
         kmin, kmax = _read(os.path.join(d, "min_value")), _read(os.path.join(d, "max_value"))
