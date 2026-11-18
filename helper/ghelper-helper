@@ -587,15 +587,21 @@ def op_aura(a):
             raise OpError(f"HID {path}: {e.strerror or e}")
         finally:
             os.close(fd)
+    led = "/sys/class/leds/asus::kbd_backlight/brightness"
+    led_done = False
+    if brightness is not None and os.path.exists(led):
+        try:
+            _write(led, brightness)
+            led_done = True
+        except OpError:
+            pass
     if not done:
-        raise OpError("keine ASUS-Aura-Tastatur gefunden")
-    if brightness is not None:
-        led = "/sys/class/leds/asus::kbd_backlight/brightness"
-        if os.path.exists(led):
-            try:
-                _write(led, brightness)
-            except OpError:
-                pass
+        # Tastatur ohne RGB (viele TUF/Vivobook/Zenbook): nur die Helligkeit zählt
+        if led_done:
+            return f"Helligkeit {brightness} (keine RGB-Tastatur)"
+        if brightness is None and os.path.exists(led):
+            return "keine RGB-Tastatur"
+        raise OpError("keine ASUS-Tastaturbeleuchtung gefunden")
     return f"Modus {mode}, #{r:02x}{g:02x}{b:02x}" + (f", Helligkeit {brightness}" if brightness is not None else "")
 
 

@@ -195,7 +195,8 @@ class GHelperApp(Adw.Application):
             nid += 1
         items.append({"id": 3, "type": "separator"})
         pref = self.cfg["gpu_pref"]
-        for gid, text in (("eco", "Eco"), ("standard", "Standard"), ("optimized", "Optimiert")):
+        gpus = (("eco", "Eco"), ("standard", "Standard"), ("optimized", "Optimiert")) if self.ctl.caps["dgpu"] else ()
+        for gid, text in gpus:
             checked = pref == "optimized" if gid == "optimized" else (self.ctl.gpu_hw == gid and pref != "optimized")
             items.append({"id": nid, "label": text, "type": "radio", "checked": checked,
                           "action": lambda g=gid: self.ctl.set_gpu(g)})
@@ -227,7 +228,7 @@ class GHelperApp(Adw.Application):
         elif act.startswith("mode_"):
             self.ctl.set_mode(act[5:])
         elif act == "cycle_screen":
-            order = ["auto", "60", "240"]
+            order = ["auto", "min", "max"]
             cur = self.cfg["screen_mode"]
             self.ctl.set_screen(order[(order.index(cur) + 1) % 3] if cur in order else "auto")
         elif act == "mic_mute":

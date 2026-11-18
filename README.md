@@ -2,12 +2,35 @@
 
 Inoffizieller Linux-Nachbau von [G-Helper](https://github.com/seerge/g-helper) 0.291.0
 für Fedora (Wayland, GNOME/KDE). Geschrieben in Python 3, PyGObject, GTK4 und
-Libadwaita, abgestimmt auf das ASUS ROG Zephyrus G16 GU606AP (Core Ultra 9 386H,
-RTX 5070 Laptop, 240-Hz-OLED).
+Libadwaita. Entwickelt auf dem ASUS ROG Zephyrus G16 GU606AP, erkennt aber die
+Hardware jedes ASUS-Laptops zur Laufzeit und zeigt nur, was das Modell kann.
 
 > **Hinweis:** Nicht verbunden mit seerge/G-Helper oder ASUS. Das Programm schreibt
-> direkt Leistungs-, Lüfter- und Akku-Einstellungen in die Hardware. Getestet nur auf
-> dem GU606AP – Nutzung auf eigene Gefahr (siehe Haftungsausschluss der GPL-3.0).
+> direkt Leistungs-, Lüfter- und Akku-Einstellungen in die Hardware. Nutzung auf eigene
+> Gefahr (siehe Haftungsausschluss der GPL-3.0).
+
+## Unterstützte Modelle
+
+Gedacht für alle ASUS-Laptops, die vom Kernel-Treiber `asus-wmi`/`asus-armoury` unterstützt
+werden (ROG Zephyrus, Strix, Flow, TUF, außerdem Zenbook/Vivobook mit eingeschränktem Umfang).
+Die App passt sich automatisch an:
+
+| Hardware | Verhalten |
+|---|---|
+| Intel oder AMD Ryzen | Temperatur über `coretemp` bzw. `k10temp`; RAPL-Watt nur bei Intel, sonst über `asus-armoury` |
+| NVIDIA-, AMD- oder keine dGPU | GPU-Bereich nur mit zweiter GPU; „Ultimativ“ nur mit MUX-Schalter |
+| 1–3 Lüfter | nur die Lüfterkurven, die das Modell hat |
+| Panel 60/120/144/165/240 Hz | Tasten zeigen die echten Raten des Panels |
+| RGB- oder einfarbige Tastatur | ohne RGB nur Helligkeit |
+| Slash/AniMe | Slash Lighting nur, wenn die Leiste vorhanden ist |
+| Watt-Grenzen | werden in den vom Modell gemeldeten Bereich geklemmt |
+
+Auf dem GU606AP sind die Profile (Leise mit 80 W und eigener Lüfterkurve) voreingestellt.
+Alle anderen Modelle starten mit den Werkseinstellungen der Firmware.
+
+**Getestet:** ROG Zephyrus G16 GU606AP. Läuft es auf deinem Modell (oder nicht)?
+Bitte ein [Issue](https://github.com/Breitmann177/g-helper-linux/issues) mit Modellname
+und der Zeile `[hw] …` aus `g-helper-linux --no-apply` im Terminal.
 
 ## Installation
 
@@ -86,7 +109,7 @@ Der Root-Helfer lässt eine Kurve nur zu, wenn die Temperaturen streng steigen,
 die Drehzahlen nicht fallen und der Lüfter ab 85 °C mit mindestens 20 % läuft.
 Die mitgelieferten Leise-Kurven erfüllen das.
 
-## Ehrliche Einschränkungen (Stand: Kernel 7.3.4, asusctl 6.3.8)
+## Ehrliche Einschränkungen (GU606AP, Kernel 7.3.4, asusctl 6.3.8)
 
 * **Slash Lighting:** asusd bietet für das GU606AP kein Slash-Interface. Die App
   sendet deshalb wie G-Helper selbst die HID-Pakete aus `SlashDevice.cs`. Das Protokoll

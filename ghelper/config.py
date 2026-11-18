@@ -16,7 +16,8 @@ FAN_MAX_RPM = {"cpu": 6400, "gpu": 6400, "mid": 10000}
 FANS = ("cpu", "gpu", "mid")
 
 # ---------------------------------------------------------------------------
-# Dein Profil "Leise" – exakt aus dem Screenshot übernommen
+# Profil "Leise" des GU606AP (Zephyrus G16 2026) – nur dort voreingestellt.
+# Andere Modelle starten mit den Werkskurven/-grenzen der Firmware.
 # ---------------------------------------------------------------------------
 QUIET_CURVES = {
     "cpu": [[30, 0], [50, 0], [60, 0], [65, 0], [70, 2600], [80, 3000], [90, 3300], [100, 3600]],
@@ -55,21 +56,47 @@ def _mode(name, base, power_mode, boost, limits, pl1, pl2, cross, dyn, temp, cur
     }
 
 
-DEFAULTS = {
-    "version": 1,
-    "current_mode": "quiet",
-    "mode_order": ["quiet", "balanced", "turbo"],
-    "modes": {
-        "quiet": _mode("Leise", "quiet", "Balanced", "Disabled",
-                       True, 80, 80, 50, 10, 97, True, QUIET_CURVES),
+def _board():
+    try:
+        with open("/sys/class/dmi/id/board_name") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+TUNED_BOARD = _board().startswith("GU606")      # Modell, für das die Voreinstellungen gemacht sind
+
+
+def _default_modes():
+    if TUNED_BOARD:
+        return {
+            "quiet": _mode("Leise", "quiet", "Balanced", "Disabled",
+                           True, 80, 80, 50, 10, 97, True, QUIET_CURVES),
+            "balanced": _mode("Ausbalanciert", "balanced", "Balanced", "Enabled",
+                              False, 55, 65, 45, 15, 95, False, BALANCED_CURVES),
+            "turbo": _mode("Turbo", "performance", "Performance", "Aggressive",
+                           False, 110, 140, 90, 25, 100, True, TURBO_CURVES),
+        }
+    # Alle anderen: nur Plattformprofil + EPP, Lüfter und Watt bleiben bei der Firmware,
+    # bis man selbst Kurven/Grenzen setzt (wie G-Helper beim ersten Start).
+    return {
+        "quiet": _mode("Leise", "quiet", "Power Saver", "Enabled",
+                       False, 35, 45, 35, 5, 95, False, QUIET_CURVES),
         "balanced": _mode("Ausbalanciert", "balanced", "Balanced", "Enabled",
                           False, 55, 65, 45, 15, 95, False, BALANCED_CURVES),
         "turbo": _mode("Turbo", "performance", "Performance", "Aggressive",
-                       False, 110, 140, 90, 25, 100, True, TURBO_CURVES),
-    },
+                       False, 80, 100, 80, 25, 100, False, TURBO_CURVES),
+    }
+
+
+DEFAULTS = {
+    "version": 1,
+    "current_mode": "quiet" if TUNED_BOARD else "balanced",
+    "mode_order": ["quiet", "balanced", "turbo"],
+    "modes": _default_modes(),
     "gpu_pref": "",                 # eco | standard | ultimate | optimized ("" = nur Hardware anzeigen)
     "optimized_ac_target": "standard",
-    "screen_mode": "240",           # auto | 60 | 240
+    "screen_mode": "max",           # auto | min | max (niedrigste / höchste Rate des Panels)
     "dim": 100,
     "splendid": "Default",
     "color_temp": "Cold",
@@ -131,7 +158,11 @@ class Config:
             if mid not in self.data["mode_order"]:
                 self.data["mode_order"].append(mid)
         if self.data["current_mode"] not in self.data["modes"]:
-            self.data["current_mode"] = "quiet"
+            self.data["current_mode"] = DEFAULTS["current_mode"]
+        # alte Versionen speicherten feste Hz ("60"/"240") → min/max, passt für jedes Panel
+        sm = str(self.data.get("screen_mode", "max"))
+        if sm.isdigit():
+            self.data["screen_mode"] = "min" if int(sm) <= 60 else "max"
 
     def save(self):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)

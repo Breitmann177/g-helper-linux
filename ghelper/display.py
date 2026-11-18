@@ -78,7 +78,29 @@ class Display:
                     return sorted({round(m[3]) for m in mon[1] if (m[1], m[2]) == (cur[1], cur[2])})
             except GLib.Error:
                 pass
-        return [60, 240]
+        if self.desktop == "kde":
+            kde = self._kde_internal()
+            if kde and kde[2]:
+                return kde[2]
+        return []
+
+    @staticmethod
+    def _kde_internal():
+        """kscreen-doctor -o → (Name, aktuelle Auflösung, verfügbare Hz bei dieser Auflösung)."""
+        if not shutil.which("kscreen-doctor"):
+            return None
+        ok, out = run(["kscreen-doctor", "-o"], timeout=5)
+        out = re.sub(r"\x1b\[[0-9;]*m", "", out)               # Farben entfernen
+        for block in re.split(r"(?=Output: )", out):
+            m = re.match(r"Output: \d+ (eDP-\d+)", block)
+            if not m:
+                continue
+            cur = re.search(r"(\d+x\d+)@([\d.]+)\*", block)
+            res = cur.group(1) if cur else None
+            rates = sorted({round(float(hz)) for r, hz in re.findall(r"(\d+x\d+)@([\d.]+)", block)
+                            if res is None or r == res})
+            return m.group(1), res, rates
+        return None
 
     @staticmethod
     def _current_mode(modes):
@@ -108,11 +130,10 @@ class Display:
         if self.proxy:
             return self._mutter_set_refresh(hz)
         if self.desktop == "kde" and shutil.which("kscreen-doctor"):
-            ok, out = run(["kscreen-doctor", "-o"], timeout=5)
-            m = re.search(r"Output: \d+ (eDP-\d)", out)
-            name = m.group(1) if m else "eDP-1"
-            r = re.search(rf"{name}.*?(\d+x\d+)@\d+\*", out, re.S)
-            res = r.group(1) if r else "2560x1600"
+            kde = self._kde_internal()
+            if not kde or not kde[1]:
+                return False, "internes Display (eDP) in kscreen-doctor nicht gefunden"
+            name, res, _rates = kde
             return run(["kscreen-doctor", f"output.{name}.mode.{res}@{hz}"], timeout=10)
         return False, "Kein unterstützter Wayland-Compositor (GNOME/KDE) erkannt"
 

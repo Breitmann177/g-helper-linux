@@ -61,7 +61,9 @@ class MainPanel(Gtk.Box):
         self._dim_apply = Debouncer(120, lambda v: ctl.set_color(dim=v))
 
         self._build_performance()
-        self._build_gpu()
+        self.gpu_tiles = {}
+        if ctl.caps["dgpu"]:              # Zenbook/Vivobook ohne zweite GPU: kein GPU-Bereich
+            self._build_gpu()
         self._build_screen()
         self._build_gamma()
         self._build_slash()
@@ -121,14 +123,20 @@ class MainPanel(Gtk.Box):
             t.connect("clicked", lambda _b, g=gid: self.ctl.set_gpu(g))
             if not self.ctl.gpu_allowed(gid):
                 t.set_sensitive(False)
-                t.set_tooltip_text(tip + "\n\nGesperrt: NVIDIA-Treiber ist per Kernel-Parameter "
-                                         "(module_blacklist) deaktiviert – nur Eco ist sicher.")
+                if gid == "ultimate" and not hw.armoury_attr("gpu_mux_mode"):
+                    why = "Dieses Modell hat keinen MUX-Schalter."
+                else:
+                    why = ("NVIDIA-Treiber ist nicht geladen oder per Kernel-Parameter "
+                           "(module_blacklist) deaktiviert – nur Eco ist sicher.")
+                t.set_tooltip_text(tip + "\n\nGesperrt: " + why)
             self.gpu_tiles[gid] = t
             tiles.append(t)
         p.append(tiles)
         self.append(p)
 
     def refresh_gpu(self, busy_target=None):
+        if not self.gpu_tiles:
+            return
         hwmode = self.ctl.gpu_hw
         pref = self.cfg["gpu_pref"]
         for g, t in self.gpu_tiles.items():
@@ -148,11 +156,11 @@ class MainPanel(Gtk.Box):
         right.append(self.mid_info)
         p.append(row)
         tiles = grid(4)
-        rates = self.ctl.display.available_rates() or [60, 240]
-        lo, hi = min(rates), max(rates)
+        lo, hi = self.ctl.screen_rates()
         self.screen_tiles = {}
         # buttonScreenAuto / button60Hz / button120Hz: BorderColor = colorGray
-        for key, text in (("auto", "Auto"), (str(lo), f"{lo}Hz"), (str(hi), f"{hi}Hz")):
+        # Tasten zeigen die echten Raten des Panels (60/120, 60/144, 60/165, 60/240 …)
+        for key, text in (("auto", "Auto"), ("min", f"{lo}Hz"), ("max", f"{hi}Hz")):
             t = Tile(text, None, "gray", short=True)
             t.connect("clicked", lambda _b, k=key: self.ctl.set_screen(k))
             self.screen_tiles[key] = t
@@ -245,8 +253,13 @@ class MainPanel(Gtk.Box):
         p.append(row)
         box = grid(3)
         k = self.cfg["kbd"]
-        box.append(Dropdown(AURA_LABELS, k["mode"], lambda v: self.ctl.set_kbd(mode=v)))
+        aura_drop = Dropdown(AURA_LABELS, k["mode"], lambda v: self.ctl.set_kbd(mode=v))
+        box.append(aura_drop)
         color_btn = SmallButton("Farbe", main=True)
+        if not self.ctl.caps["aura"]:     # Tastatur ohne RGB: nur Helligkeit (Fn-Tasten / Extra)
+            for w in (aura_drop, color_btn):
+                w.set_sensitive(False)
+                w.set_tooltip_text("Diese Tastatur hat keine RGB-Beleuchtung")
         self.swatch = Gtk.DrawingArea(content_width=12, content_height=12, valign=Gtk.Align.CENTER)
         self.swatch.add_css_class("gh-swatch")
         self.swatch.set_draw_func(self._draw_swatch)
@@ -394,7 +407,8 @@ class MainPanel(Gtk.Box):
         cpu_temp = f": {t.cpu_temp:.0f}°C" if t.cpu_temp is not None else ""
         self.cpu_info.set_label(f"CPU{cpu_temp}{fan(t.cpu_fan)}")
         gpu_temp = f": {t.gpu_temp:.0f}°C" if t.gpu_temp is not None else ""
-        self.gpu_info.set_label(f"GPU{gpu_temp}{fan(t.gpu_fan)}")
+        if self.gpu_tiles:
+            self.gpu_info.set_label(f"GPU{gpu_temp}{fan(t.gpu_fan)}")
         self.mid_info.set_label(f"Mid Lüfter: {t.mid_fan}RPM" if t.mid_fan is not None else "")
         if t.bat_watts is not None and t.bat_status in ("Charging", "Discharging"):
             word = "Lädt" if t.bat_status == "Charging" else "Entlädt"

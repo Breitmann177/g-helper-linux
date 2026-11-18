@@ -25,10 +25,13 @@ class Controller:
         self.sensors = hw.Sensors()
         self.display = Display()
         self.caps = hw.capabilities()
+        print(f"[hw] {hw.model_title()} · CPU {self.caps['cpu_vendor'] or '?'} · Lüfter {self.caps['fans'] or '–'}"
+              f" · dGPU {'ja' if self.caps['dgpu'] else 'nein'} · RGB {'ja' if self.caps['aura'] else 'nein'}")
         self.listeners = []
         self.gpu_hw = None              # tatsächlicher GPU-Modus
-        # NVIDIA-Treiber per Kernel-Parameter gesperrt → nur Eco ist sicher (kein MUX/Hybrid-Wechsel)
-        self.nvidia_ok = hw.nvidia_driver_loaded() and not hw.nvidia_blacklisted()
+        # NVIDIA-Treiber per Kernel-Parameter gesperrt (oder NVIDIA-Karte da, aber Treiber fehlt)
+        # → nur Eco ist sicher. AMD-dGPU oder Eco-Modus (Karte vom Bus) sind davon nicht betroffen.
+        self.nvidia_ok = not hw.nvidia_blacklisted() and (not self.caps["nvidia"] or hw.nvidia_driver_loaded())
         self.gpu_busy = False
         self.on_ac = True
         self.telemetry = self.sensors.read()
@@ -114,16 +117,25 @@ class Controller:
                 ops.append({"op": "temp_limit", "value": self._tjmax() - default})
             return ops
         arm = self.caps["armoury"]
+
+        def armoury(name, value):
+            # Jedes Modell hat eigene Grenzen (z. B. 35 W Zenbook vs. 140 W Strix) → in den Bereich klemmen
+            info = arm[name]
+            if info.get("min") is not None:
+                value = max(info["min"], value)
+            if info.get("max") is not None:
+                value = min(info["max"], value)
+            ops.append({"op": "armoury", "name": name, "value": value})
         if "ppt_pl1_spl" in arm:
-            ops.append({"op": "armoury", "name": "ppt_pl1_spl", "value": m["pl1"]})
+            armoury("ppt_pl1_spl", m["pl1"])
         if "ppt_pl2_sppt" in arm:
-            ops.append({"op": "armoury", "name": "ppt_pl2_sppt", "value": m["pl2"]})
+            armoury("ppt_pl2_sppt", m["pl2"])
         # "Cross Loading Processor Power" = ASUS-Attribut 0x001200B0 (Kernel: ppt_apu_sppt).
         # Auf Kerneln ohne dieses Attribut wird der Wert nur gespeichert.
         if "ppt_apu_sppt" in arm:
-            ops.append({"op": "armoury", "name": "ppt_apu_sppt", "value": m["cross"]})
+            armoury("ppt_apu_sppt", m["cross"])
         if "nv_dynamic_boost" in arm and self.gpu_hw != "eco":
-            ops.append({"op": "armoury", "name": "nv_dynamic_boost", "value": m["dyn_boost"]})
+            armoury("nv_dynamic_boost", m["dyn_boost"])
         if self.caps["rapl"]:
             ops.append({"op": "rapl", "pl1": m["pl1"], "pl2": m["pl2"]})
         if self.caps["tcc"]:
@@ -134,7 +146,7 @@ class Controller:
         if not self.caps["fan_curves"]:
             return []
         ops = []
-        for fan in FANS:
+        for fan in self.caps["fans"]:            # nur Lüfter, die das Modell wirklich hat
             if m["curves_enabled"]:
                 pts = [[t, rpm_to_pwm(fan, r)] for t, r in m["curves"][fan]]
                 ops.append({"op": "fan_curve", "fan": fan, "points": pts, "enable": True})
@@ -149,9 +161,11 @@ class Controller:
             off = hw.tcc_offset()
             if off is not None:
                 self.cfg["tcc_default"] = off
-        ops = [{"op": "platform_profile", "value": m["base"]},
-               {"op": "epp", "value": self._epp_for(m)},
-               {"op": "cpu_boost", "enabled": m["cpu_boost"] != "Disabled"}]
+        ops = [{"op": "platform_profile", "value": m["base"]}]
+        if self.caps["epp"]:              # z. B. amd-pstate im passive-Modus hat kein EPP
+            ops.append({"op": "epp", "value": self._epp_for(m)})
+        if self.caps["boost"]:
+            ops.append({"op": "cpu_boost", "enabled": m["cpu_boost"] != "Disabled"})
         ops += self._limit_ops(m) + self._fan_ops(m)
 
         def done(res):
@@ -230,6 +244,8 @@ class Controller:
         return GPU_LABELS.get(self.gpu_hw, "–")
 
     def gpu_allowed(self, ui_mode):
+        if ui_mode in ("ultimate",) and not hw.armoury_attr("gpu_mux_mode"):
+            return False                 # kein MUX-Schalter → kein „Nur dGPU“
         return ui_mode == "eco" or self.nvidia_ok
 
     def set_gpu(self, ui_mode, from_auto=False):
@@ -294,12 +310,19 @@ class Controller:
         self.cfg["screen_mode"] = mode
         self.apply_screen()
 
+    def screen_rates(self):
+        rates = self.display.available_rates() or [60, 120]
+        return min(rates), max(rates)
+
     def apply_screen(self):
         mode = self.cfg["screen_mode"]
-        hz = (240 if self.on_ac else 60) if mode == "auto" else int(mode)
         rates = self.display.available_rates()
-        if rates and hz not in rates:
-            hz = max(r for r in rates if r <= hz) if any(r <= hz for r in rates) else rates[-1]
+        if len(rates) < 2:                 # nur eine Rate oder nicht ermittelbar → nichts umschalten
+            self.emit("screen", self.display.get_refresh())
+            return
+        lo, hi = min(rates), max(rates)
+        # auto: Netzteil = höchste Rate des Panels (144/165/240 …), Akku = niedrigste
+        hz = {"auto": hi if self.on_ac else lo, "min": lo, "max": hi}.get(mode, hi)
         cur = self.display.get_refresh()
         if cur != hz:
             ok, msg = self.display.set_refresh(hz)
@@ -363,6 +386,8 @@ class Controller:
 
     def apply_kbd(self, with_brightness=True):
         """Tastaturfarbe, -modus und -helligkeit setzen (beim Start, nach Standby, bei Änderung)."""
+        if not (self.caps["aura"] or self.caps["kbd_led"]):
+            return                       # Modell ohne Tastaturbeleuchtung
         k = self.cfg["kbd"]
         c = k.get("color", "#ffffff").lstrip("#")
         op = {"op": "aura", "mode": self.AURA_MODE.get(k.get("mode"), 0),

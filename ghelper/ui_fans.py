@@ -116,7 +116,10 @@ class FansPanel(Gtk.Box):
         box.append(self.snap_cb)
 
         self.graphs = {}
+        shown = self.ctl.caps["fans"] or ["cpu", "gpu"]     # 2-Lüfter-Modelle haben kein „mid“
         for fan, title, color in GRAPHS:
+            if fan not in shown:
+                continue
             g = FanCurveGraph(title, color, FAN_MAX_RPM[fan], lambda pts, f=fan: self._curve_changed(f, pts))
             g.snap = self.cfg["fans_snap"]
             g.set_margin_start(8)
@@ -248,6 +251,7 @@ class FansPanel(Gtk.Box):
                 g.factory = factory.get(fan)
                 g.queue_draw()
         elif ev == "telemetry":
-            self.graphs["cpu"].set_current_temp(round(data.cpu_temp) if data.cpu_temp else None)
-            self.graphs["mid"].set_current_temp(round(data.cpu_temp) if data.cpu_temp else None)
-            self.graphs["gpu"].set_current_temp(round(data.gpu_temp) if data.gpu_temp else None)
+            temps = {"cpu": data.cpu_temp, "mid": data.cpu_temp, "gpu": data.gpu_temp}
+            for fan, g in self.graphs.items():
+                v = temps.get(fan)
+                g.set_current_temp(round(v) if v else None)

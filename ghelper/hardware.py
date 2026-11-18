@@ -1,5 +1,6 @@
 """
-Hardware-Abstraktion für ASUS ROG Zephyrus G16 (GU606AP) unter Fedora.
+Hardware-Abstraktion für ASUS-Laptops (ROG/TUF/Zenbook/Vivobook) unter Linux.
+Alles wird zur Laufzeit erkannt: Intel/AMD, NVIDIA/AMD/keine dGPU, 1–3 Lüfter, RGB oder nicht.
 
 Lesen (ohne root):  sysfs/hwmon, power_supply, platform-profile, asus-armoury
 Schreiben (root):   über den Polkit-Helfer /usr/libexec/g-helper-linux/ghelper-helper
@@ -82,6 +83,19 @@ def model_title():
     return f"{fam} {board}".strip()
 
 
+def cpu_vendor():
+    """→ "intel" | "amd" | "" """
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.startswith("vendor_id"):
+                    v = line.split(":", 1)[1].strip()
+                    return {"GenuineIntel": "intel", "AuthenticAMD": "amd"}.get(v, "")
+    except OSError:
+        pass
+    return ""
+
+
 def cpu_name():
     try:
         with open("/proc/cpuinfo") as f:
@@ -123,6 +137,10 @@ class Sensors:
             for lab in self.coretemp.glob("temp*_label"):
                 if (read(lab) or "").startswith("Package"):
                     self.pkg_temp = Path(str(lab).replace("_label", "_input"))
+        k10 = find_hwmon("k10temp")             # AMD Ryzen: Tctl (bzw. Tdie)
+        if self.pkg_temp is None and k10:
+            labels = {read(l): Path(str(l).replace("_label", "_input")) for l in k10.glob("temp*_label")}
+            self.pkg_temp = labels.get("Tdie") or labels.get("Tctl") or (k10 / "temp1_input")
         if self.pkg_temp is None:
             tz = find_hwmon("acpitz")
             self.pkg_temp = tz / "temp1_input" if tz else None
@@ -144,6 +162,12 @@ class Sensors:
         for d in glob.glob("/sys/bus/pci/devices/*"):
             if read(os.path.join(d, "vendor")) == "0x10de" and (read(os.path.join(d, "class")) or "").startswith("0x03"):
                 self.nvidia_pci = Path(d)
+                break
+        # AMD-dGPU (z. B. Radeon RX in G14/Strix): amdgpu-hwmon, dessen Gerät NICHT boot_vga ist
+        self.amd_dgpu_temp = None
+        for d in glob.glob("/sys/class/hwmon/hwmon*"):
+            if read(os.path.join(d, "name")) == "amdgpu" and read(os.path.join(d, "device", "boot_vga")) == "0":
+                self.amd_dgpu_temp = Path(d) / "temp1_input"
                 break
         self._gpu_temp = None
         self._gpu_busy = False
@@ -177,6 +201,9 @@ class Sensors:
             t.gpu_temp = self._gpu_temp
         else:
             self._gpu_temp = None
+        if t.gpu_temp is None and self.amd_dgpu_temp:
+            v = read_int(self.amd_dgpu_temp)
+            t.gpu_temp = v / 1000 if v is not None else None
         if self.battery:
             b = self.battery
             t.battery = None
@@ -269,11 +296,67 @@ def fn_lock_path():
     return None
 
 
+def curve_fans():
+    """Lüfter mit eigener Kurven-Schnittstelle (viele Modelle haben nur CPU + GPU, ohne „mid“)."""
+    d = find_hwmon("asus_custom_fan_curve")
+    if not d:
+        return []
+    return [fan for fan, i in FAN_INDEX.items() if (d / f"pwm{i}_enable").exists()]
+
+
+def has_dgpu():
+    """Gibt es überhaupt eine zweite GPU? Im Eco-Modus verschwindet sie vom PCI-Bus,
+    deshalb zählen auch die ASUS-Schalter dgpu_disable / gpu_mux_mode."""
+    if armoury_attr("dgpu_disable") or armoury_attr("gpu_mux_mode"):
+        return True
+    gpus = [d for d in glob.glob("/sys/bus/pci/devices/*")
+            if (read(os.path.join(d, "class")) or "").startswith("0x03")]
+    return len(gpus) > 1 or any(read(os.path.join(d, "vendor")) == "0x10de" for d in gpus)
+
+
+def has_nvidia():
+    return any(read(os.path.join(d, "vendor")) == "0x10de"
+               and (read(os.path.join(d, "class")) or "").startswith("0x03")
+               for d in glob.glob("/sys/bus/pci/devices/*"))
+
+
+AURA_PIDS = {0x1A30, 0x1854, 0x1869, 0x1866, 0x19B6, 0x1822, 0x1837, 0x184A, 0x183D, 0x8502, 0x1807,
+             0x17E0, 0x1ABE, 0x1B4C, 0x1B6E, 0x1B2C, 0x8854, 0x1CE7, 0x1CE6, 0x1BF2, 0x1BF3, 0x1CD7,
+             0x1CD8, 0x4B42}     # wie im Root-Helfer (G-Helper AsusHid.cs)
+
+
+def aura_supported():
+    """RGB-Tastatur (ASUS-Aura-HID) vorhanden? Sonst gibt es nur Helligkeit."""
+    for d in glob.glob("/sys/class/hidraw/hidraw*"):
+        ue = read(os.path.join(d, "device", "uevent"), "") or ""
+        hid = next((l.split("=", 1)[1] for l in ue.splitlines() if l.startswith("HID_ID=")), "")
+        parts = hid.split(":")
+        try:
+            if len(parts) == 3 and int(parts[1], 16) == 0x0B05 and int(parts[2], 16) in AURA_PIDS:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+KBD_LED = "/sys/class/leds/asus::kbd_backlight/brightness"
+
+
 def capabilities():
+    vendor = cpu_vendor()
     caps = {
+        "cpu_vendor": vendor,
         "fan_curves": find_hwmon("asus_custom_fan_curve") is not None,
+        "fans": curve_fans(),
         "tcc": bool(glob.glob("/sys/bus/pci/devices/*/tcc_offset_degree_celsius")),
-        "rapl": bool(glob.glob("/sys/class/powercap/intel-rapl:0")),
+        # AMD hat auch powercap/intel-rapl, aber nur zum Lesen – Limits gehen dort über asus-armoury
+        "rapl": vendor == "intel" and bool(glob.glob("/sys/class/powercap/intel-rapl:0")),
+        "dgpu": has_dgpu(),
+        "nvidia": has_nvidia(),
+        "aura": aura_supported(),
+        "kbd_led": os.path.exists(KBD_LED),
+        "epp": os.path.exists("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"),
+        "boost": cpu_boost_enabled() is not None,
         "fn_lock": fn_lock_path() is not None,
         "asusctl": shutil.which("asusctl") is not None,
         "supergfxctl": shutil.which("supergfxctl") is not None,
