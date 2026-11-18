@@ -17,6 +17,12 @@ fi
 if ! grep -qi fedora /etc/os-release; then
     warn "Kein Fedora erkannt – das Skript ist für Fedora geschrieben, fahre trotzdem fort."
 fi
+VENDOR="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
+if [[ "$VENDOR" != *ASUS* ]]; then
+    warn "Kein ASUS-Gerät erkannt (Hersteller: ${VENDOR:-unbekannt})."
+    read -r -p "Trotzdem installieren? [j/N] " ans
+    [[ "$ans" =~ ^[jJyY]$ ]] || exit 1
+fi
 if ! id -nG "$USER" | grep -qw wheel; then
     warn "Nutzer $USER ist nicht in der Gruppe 'wheel' – Hardware-Änderungen fragen dann nach dem Passwort."
 fi
@@ -93,3 +99,4 @@ if systemctl is-active -q tuned-ppd || systemctl is-active -q power-profiles-dae
 fi
 
 green "Fertig. Start mit:  g-helper-linux   (oder über das App-Menü 'G-Helper')"
+warn "Einmal ab- und wieder anmelden, damit Tray-Icon und ROG-Taste funktionieren."

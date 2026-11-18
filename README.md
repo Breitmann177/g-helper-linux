@@ -11,12 +11,23 @@ RTX 5070 Laptop, 240-Hz-OLED).
 
 ## Installation
 
+Voraussetzung: Fedora (Workstation/KDE) auf einem ASUS-ROG-Laptop.
+
 ```bash
+git clone https://github.com/Breitmann177/g-helper-linux.git
+cd g-helper-linux
 ./install.sh
 ```
 
+Danach einmal ab- und wieder anmelden (für Tray-Icon und Tastenrechte).
+
+**Aktualisieren:** `cd g-helper-linux && git pull && ./install.sh`
+
+**Ohne Git:** Unter [Releases](https://github.com/Breitmann177/g-helper-linux/releases)
+das neueste Archiv laden, entpacken und darin `./install.sh` ausführen.
+
 Das Skript installiert die Abhängigkeiten per dnf, den Root-Helfer, die
-Polkit-Aktion und -Regel (Gruppe `wheel` → kein Passwort), die udev-Regel für
+Polkit-Aktion und -Regel (Gruppe `wheel` → kein Passwort; der Helfer führt nur fest eingebaute, geprüfte Operationen aus), die udev-Regel für
 die ROG-Taste, den systemd-Dienst fürs Ladelimit, den Desktop-Eintrag und
 aktiviert die GNOME-AppIndicator-Erweiterung für das Tray-Icon.
 
