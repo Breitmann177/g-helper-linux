@@ -1,0 +1,3 @@
+# G-Helper Linux: ROG-/M4-Taste und Fn-Tasten des ASUS-WMI-Hotkey-Geräts für den
+# angemeldeten Nutzer lesbar machen (evdev-Hotkey-Listener der GUI).
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="Asus WMI hotkeys", TAG+="uaccess"

@@ -1,0 +1,4 @@
+Die PNG-Symbole in diesem Ordner stammen unverändert aus G-Helper
+(https://github.com/seerge/g-helper, GPL-3.0). G-Helper verwendet Icons von
+Icons8 (https://icons8.com). Zur Laufzeit werden sie – wie im Original-Dark-Theme
+(ControlHelper.AdjustImage) – auf die Textfarbe #F0F0F0 eingefärbt.

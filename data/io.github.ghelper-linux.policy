@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>G-Helper Linux</vendor>
+  <action id="io.github.ghelper-linux.helper">
+    <description>Change ASUS laptop hardware settings</description>
+    <description xml:lang="de">ASUS-Laptop-Hardwareeinstellungen ändern</description>
+    <message>Authentication is required to change hardware settings</message>
+    <message xml:lang="de">Zum Ändern der Hardwareeinstellungen ist eine Authentifizierung nötig</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/g-helper-linux/ghelper-helper</annotate>
+  </action>
+</policyconfig>

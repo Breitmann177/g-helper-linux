@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=G-Helper
+GenericName=ASUS Laptop Control
+Comment=Leistungsmodus, GPU, Lüfter, Bildschirm und Akku für ASUS ROG
+Exec=g-helper-linux
+Icon=g-helper-linux
+Terminal=false
+Categories=System;Settings;HardwareSettings;
+Keywords=asus;rog;fan;gpu;battery;zephyrus;
+StartupNotify=false

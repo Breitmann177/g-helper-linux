@@ -1,0 +1,10 @@
+[Unit]
+Description=G-Helper Linux: Akku-Ladelimit wiederherstellen
+After=multi-user.target asusd.service suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/g-helper-linux/ghelper-helper --restore
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

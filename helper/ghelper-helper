@@ -1,0 +1,666 @@
+#!/usr/bin/python3 -I
+"""
+G-Helper Linux – privilegierter Hardware-Helfer.
+
+Wird von der GUI über `pkexec` gestartet (Polkit-Regel erlaubt Mitgliedern
+der Gruppe `wheel` die Ausführung ohne Passwort). Liest einen JSON-Auftrag
+von stdin:
+
+    {"ops": [{"op": "platform_profile", "value": "quiet"}, ...]}
+
+und schreibt das Ergebnis als JSON auf stdout. Es werden ausschließlich die
+hier fest einprogrammierten Operationen ausgeführt; alle Pfade werden vom
+Helfer selbst ermittelt, alle Werte auf gültige Bereiche geprüft.
+
+Zusätzlich: `ghelper-helper --restore` (für den systemd-Dienst) stellt das
+gespeicherte Akku-Ladelimit nach Boot/Resume wieder her.
+"""
+import glob
+import json
+import os
+import subprocess
+import sys
+
+ETC_DIR = "/etc/g-helper-linux"
+CHARGE_FILE = os.path.join(ETC_DIR, "charge_limit")
+
+ARMOURY = "/sys/class/firmware-attributes/asus-armoury/attributes"
+NB_WMI = "/sys/devices/platform/asus-nb-wmi"
+
+ARMOURY_WHITELIST = {
+    # name: (min, max) als letzte Sicherheitsgrenze, falls der Kernel keine liefert
+    "ppt_pl1_spl": (5, 250),
+    "ppt_pl2_sppt": (5, 250),
+    "ppt_pl3_fppt": (5, 250),
+    "ppt_apu_sppt": (5, 250),
+    "ppt_platform_sppt": (5, 250),
+    "nv_dynamic_boost": (0, 50),
+    "nv_temp_target": (60, 90),
+    "nv_tgp": (10, 250),
+    "dgpu_disable": (0, 1),
+    "gpu_mux_mode": (0, 1),
+    "panel_overdrive": (0, 1),
+    "boot_sound": (0, 1),
+}
+
+SERVICES = {"asusd", "supergfxd", "tuned", "tuned-ppd", "power-profiles-daemon"}
+SERVICE_ACTIONS = {"start", "stop", "restart", "enable", "disable"}
+
+FAN_INDEX = {"cpu": 1, "gpu": 2, "mid": 3}
+PROFILES = {"quiet", "balanced", "performance"}
+SOC_MAP = {"quiet": "low-power", "balanced": "balanced", "performance": "performance"}
+EPP_VALUES = {"default", "performance", "balance_performance", "balance_power", "power"}
+
+
+class OpError(Exception):
+    pass
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _write(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+    except OSError as e:
+        raise OpError(f"{path}: {e.strerror or e}")
+
+
+def _int(v, lo, hi, what):
+    try:
+        i = int(v)
+    except (TypeError, ValueError):
+        raise OpError(f"{what}: keine Zahl ({v!r})")
+    if not lo <= i <= hi:
+        raise OpError(f"{what}: {i} außerhalb {lo}..{hi}")
+    return i
+
+
+# ----------------------------------------------------------------------------
+# Pfad-Ermittlung
+# ----------------------------------------------------------------------------
+
+def _platform_profile_dirs():
+    asus, soc = None, None
+    for d in sorted(glob.glob("/sys/class/platform-profile/*")):
+        name = _read(os.path.join(d, "name")) or ""
+        if name == "asus-wmi":
+            asus = d
+        elif soc is None:
+            soc = d
+    return asus, soc
+
+
+def _hwmon(name):
+    for d in glob.glob("/sys/class/hwmon/hwmon*"):
+        if _read(os.path.join(d, "name")) == name:
+            return d
+    return None
+
+
+def _battery():
+    for d in sorted(glob.glob("/sys/class/power_supply/BAT*")):
+        if os.path.exists(os.path.join(d, "charge_control_end_threshold")):
+            return d
+    return None
+
+
+def _rapl():
+    for d in glob.glob("/sys/class/powercap/intel-rapl:*"):
+        if _read(os.path.join(d, "name")) == "package-0":
+            return d
+    return None
+
+
+def _tjmax():
+    d = _hwmon("coretemp")
+    if d:
+        for lab in glob.glob(os.path.join(d, "temp*_label")):
+            if (_read(lab) or "").startswith("Package"):
+                crit = _read(lab.replace("_label", "_crit"))
+                if crit:
+                    return int(crit) // 1000
+    return 100
+
+
+# ----------------------------------------------------------------------------
+# Operationen
+# ----------------------------------------------------------------------------
+
+def op_platform_profile(a):
+    value = a.get("value")
+    if value not in PROFILES:
+        raise OpError(f"unbekanntes Profil {value!r}")
+    asus, soc = _platform_profile_dirs()
+    if asus:
+        _write(os.path.join(asus, "profile"), value)
+    elif os.path.exists(os.path.join(NB_WMI, "throttle_thermal_policy")):
+        _write(os.path.join(NB_WMI, "throttle_thermal_policy"),
+               {"balanced": 0, "performance": 1, "quiet": 2}[value])
+    else:
+        _write("/sys/firmware/acpi/platform_profile", value)
+    if soc:
+        choices = (_read(os.path.join(soc, "choices")) or "").split()
+        target = SOC_MAP[value]
+        if target in choices:
+            try:
+                _write(os.path.join(soc, "profile"), target)
+            except OpError:
+                pass  # SoC-Slider ist optional
+    return value
+
+
+def op_epp(a):
+    value = a.get("value")
+    if value not in EPP_VALUES:
+        raise OpError(f"ungültiger EPP-Wert {value!r}")
+    n, errors = 0, 0
+    for p in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/energy_performance_preference"):
+        gov = os.path.join(os.path.dirname(p), "scaling_governor")
+        if _read(gov) == "performance" and value != "performance":
+            # intel_pstate akzeptiert im performance-Governor nur EPP=performance
+            try:
+                _write(gov, "powersave")
+            except OpError:
+                pass
+        try:
+            _write(p, value)
+            n += 1
+        except OpError:
+            errors += 1
+    if n == 0:
+        raise OpError("EPP konnte auf keinem Kern gesetzt werden")
+    return f"{n} Kerne" + (f", {errors} Fehler" if errors else "")
+
+
+def op_cpu_boost(a):
+    enabled = bool(a.get("enabled"))
+    p = "/sys/devices/system/cpu/intel_pstate/no_turbo"
+    if os.path.exists(p):
+        _write(p, 0 if enabled else 1)
+        return "intel_pstate"
+    p = "/sys/devices/system/cpu/cpufreq/boost"
+    if os.path.exists(p):
+        _write(p, 1 if enabled else 0)
+        return "cpufreq/boost"
+    raise OpError("keine Boost-Schnittstelle gefunden")
+
+
+def op_armoury(a):
+    name = a.get("name")
+    if name not in ARMOURY_WHITELIST:
+        raise OpError(f"Attribut {name!r} nicht erlaubt")
+    lo, hi = ARMOURY_WHITELIST[name]
+    d = os.path.join(ARMOURY, name)
+    if os.path.isdir(d):
+        kmin, kmax = _read(os.path.join(d, "min_value")), _read(os.path.join(d, "max_value"))
+        if kmin and kmax and kmin.lstrip("-").isdigit() and kmax.lstrip("-").isdigit():
+            lo, hi = int(kmin), int(kmax)
+        value = _int(a.get("value"), lo, hi, name)
+        _write(os.path.join(d, "current_value"), value)
+        return value
+    legacy = os.path.join(NB_WMI, name)
+    if os.path.exists(legacy):
+        value = _int(a.get("value"), lo, hi, name)
+        _write(legacy, value)
+        return value
+    raise OpError(f"{name}: vom Kernel nicht bereitgestellt")
+
+
+def op_rapl(a):
+    d = _rapl()
+    if not d:
+        raise OpError("Intel RAPL nicht gefunden")
+    done = []
+    for key, idx in (("pl1", 0), ("pl2", 1)):
+        if a.get(key) is None:
+            continue
+        watts = _int(a.get(key), 5, 250, key)
+        name = _read(os.path.join(d, f"constraint_{idx}_name"))
+        if name not in ("long_term", "short_term"):
+            continue
+        _write(os.path.join(d, f"constraint_{idx}_power_limit_uw"), watts * 1_000_000)
+        done.append(f"{key}={watts}W")
+    return ", ".join(done)
+
+
+def op_temp_limit(a):
+    paths = glob.glob("/sys/bus/pci/devices/*/tcc_offset_degree_celsius")
+    if not paths:
+        raise OpError("tcc_offset nicht verfügbar (Modul processor_thermal_device_pci)")
+    tjmax = _tjmax()
+    limit = _int(a.get("value"), 60, tjmax, "CPU Temperature Limit")
+    offset = max(0, min(63, tjmax - limit))
+    for p in paths:
+        _write(p, offset)
+    return f"TjMax {tjmax}°C, Offset {offset}"
+
+
+def op_fan_curve(a):
+    fan = a.get("fan")
+    if fan not in FAN_INDEX:
+        raise OpError(f"unbekannter Lüfter {fan!r}")
+    d = _hwmon("asus_custom_fan_curve")
+    if not d:
+        raise OpError("asus_custom_fan_curve nicht vorhanden")
+    i = FAN_INDEX[fan]
+    if not os.path.exists(os.path.join(d, f"pwm{i}_enable")):
+        raise OpError(f"Lüfter {fan} hat keine Kurven-Schnittstelle")
+    if not a.get("enable", True):
+        _write(os.path.join(d, f"pwm{i}_enable"), 2)  # 2 = Werkskurve des Profils
+        return "Werkskurve"
+    pts = a.get("points")
+    if not isinstance(pts, list) or len(pts) != 8:
+        raise OpError("genau 8 Punkte erforderlich")
+    clean = []
+    for n, p in enumerate(pts):
+        t = _int(p[0], 0, 110, f"Punkt {n + 1} Temperatur")
+        v = _int(p[1], 0, 255, f"Punkt {n + 1} PWM")
+        clean.append((t, v))
+    for n in range(1, 8):
+        if clean[n][0] <= clean[n - 1][0]:
+            raise OpError("Temperaturen müssen streng steigen")
+        if clean[n][1] < clean[n - 1][1]:
+            raise OpError("Drehzahlen dürfen nicht fallen")
+    # Sicherheitsnetz: ab 85 °C muss der Lüfter mindestens 20 % drehen
+    for t, v in clean:
+        if t >= 85 and v < 51:
+            raise OpError(f"Sicherheitsgrenze: bei {t}°C mindestens 20% Lüfter")
+    for n, (t, v) in enumerate(clean, start=1):
+        _write(os.path.join(d, f"pwm{i}_auto_point{n}_temp"), t)
+        _write(os.path.join(d, f"pwm{i}_auto_point{n}_pwm"), v)
+    _write(os.path.join(d, f"pwm{i}_enable"), 1)
+    return "aktiv"
+
+
+def op_charge_limit(a):
+    value = _int(a.get("value"), 20, 100, "Ladelimit")
+    bat = _battery()
+    if not bat:
+        raise OpError("kein Akku mit charge_control_end_threshold")
+    _write(os.path.join(bat, "charge_control_end_threshold"), value)
+    os.makedirs(ETC_DIR, exist_ok=True)
+    _write(CHARGE_FILE, value)
+    return value
+
+
+def op_fn_lock(a):
+    value = 1 if a.get("enabled") else 0
+    for p in (os.path.join(NB_WMI, "fn_lock"),
+              os.path.join(ARMOURY, "fn_lock", "current_value"),
+              "/sys/bus/platform/devices/asus-nb-wmi/fn_lock"):
+        if os.path.exists(p):
+            _write(p, value)
+            return value
+    raise OpError("Kernel bietet keine FN-Lock-Schnittstelle (Fn+Esc nutzen)")
+
+
+def op_service(a):
+    name, action = a.get("name"), a.get("action")
+    if name not in SERVICES or action not in SERVICE_ACTIONS:
+        raise OpError("Dienst/Aktion nicht erlaubt")
+    cmd = ["systemctl", action, f"{name}.service"]
+    if action in ("enable", "disable"):
+        cmd.insert(2, "--now")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise OpError((r.stderr or r.stdout).strip() or f"rc={r.returncode}")
+    return f"{name} {action}"
+
+
+# ----------------------------------------------------------------------------
+# Slash Lighting – Port von G-Helper AnimeMatrix/SlashDevice.cs (SlashDeviceAura)
+# USB-HID 0B05:19B6, Feature-Report 0x5D, 128 Byte; GU606 = lange Leiste (35 LEDs)
+# ----------------------------------------------------------------------------
+SLASH_VID, SLASH_PID, SLASH_RID, SLASH_LEN = "00000B05", "000019B6", 0x5D, 128
+SLASH_CODES = {"Static": 0x06, "Bounce": 0x10, "Slash": 0x12, "Loading": 0x13, "Bit Stream": 0x1D,
+               "Transmission": 0x1A, "Flow": 0x19, "Flux": 0x25, "Phantom": 0x24, "Spectrum": 0x26,
+               "Hazard": 0x32, "Interfacing": 0x33, "Ramp": 0x34, "Game Over": 0x42, "Start": 0x43,
+               "Buzzer": 0x44}
+SLASH_SPECIAL = {"Dark", "Ladezustand", "Audio Visualisierung"}
+
+
+def _ioc(nr, size):
+    return (3 << 30) | (size << 16) | (ord("H") << 8) | nr   # _IOC(READ|WRITE, 'H', nr, size)
+
+
+def _slash_device():
+    for d in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        ue = _read(os.path.join(d, "device", "uevent")) or ""
+        if f"HID_ID=0003:{SLASH_VID}:{SLASH_PID}" not in ue:
+            continue
+        try:
+            with open(os.path.join(d, "device", "report_descriptor"), "rb") as f:
+                rd = f.read()
+        except OSError:
+            continue
+        if bytes([0x85, SLASH_RID]) in rd:
+            return "/dev/" + os.path.basename(d)
+    return None
+
+
+class Slash:
+    def __init__(self, path, length):
+        import fcntl
+        self.fcntl = fcntl
+        self.fd = os.open(path, os.O_RDWR)
+        self.length = length
+
+    def close(self):
+        os.close(self.fd)
+
+    def _packet(self, cmd):
+        buf = bytearray(SLASH_LEN)
+        buf[0] = SLASH_RID
+        buf[1:1 + len(cmd)] = bytes(cmd)
+        return buf
+
+    def set(self, cmd):
+        self.fcntl.ioctl(self.fd, _ioc(0x06, SLASH_LEN), self._packet(cmd))     # HIDIOCSFEATURE
+
+    def set_raw(self, buf):
+        self.fcntl.ioctl(self.fd, _ioc(0x06, SLASH_LEN), bytearray(buf))
+
+    def get(self, cmd):
+        buf = self._packet(cmd)
+        self.fcntl.ioctl(self.fd, _ioc(0x07, SLASH_LEN), buf, True)             # HIDIOCGFEATURE
+        return buf
+
+    # --- SlashDevice.cs ---
+    def wake_up(self):
+        self.set(b"ASUS Tech.Inc.")
+        self.set([0xC2])
+        self.set([0xD1, 0x01, 0x00, 0x01])
+
+    def init(self):
+        self.set([0xD7, 0x00, 0x00, 0x01, 0xAC])
+        self.set([0xD2, 0x02, 0x01, 0x08, 0xAB])
+
+    def set_enabled(self, status):
+        self.set([0xD8, 0x02, 0x00, 0x01, 0x00 if status else 0x80])
+
+    def save(self):
+        self.set([0xD4, 0x00, 0x00, 0x01, 0xAB])
+
+    def set_mode(self, code):
+        cmd = [0xD2, 0x03, 0x00, 0x0C]
+        self.set(cmd)
+        try:
+            pool = self.get(cmd)
+        except OSError:
+            pool = None
+        if pool is not None and pool[5] == 0x01:
+            pool[1], pool[2], pool[6] = 0xD3, 0x04, code
+            self.set_raw(pool)
+        else:
+            self.set([0xD3, 0x04, 0x00, 0x0C, 0x01, code, 0x02, 0x42, 0x03, 0x13, 0x04, 0x11,
+                      0x05, 0x12, 0x06, 0x13])
+
+    def set_options(self, status, brightness, interval):
+        b = int(brightness * 85.333) & 0xFF
+        self.set([0xD3, 0x03, 0x01, 0x08, 0xAB, 0xFF, 0x01, 0x01 if status else 0x00, 0x06, b, 0xFF, interval])
+
+    def set_custom(self, data):
+        self.set([0xD2, 0x02, 0x01, 0x08, 0xAC])
+        self.set([0xD3, 0x03, 0x01, 0x08, 0xAC, 0xFF, 0xFF, 0x01, 0x05, 0xFF, 0xFF])
+        self.set([0xD4, 0x00, 0x00, 0x01, 0xAC])
+        self.set([0xD3, 0x00, 0x00, self.length] + list(data[:self.length]))
+
+    def percentage_pattern(self, brightness, percentage):
+        n = self.length
+        step = 100.0 / n
+        bracket = int(percentage // step)
+        full = int(brightness * 85.333) & 0xFF
+        if bracket >= n:
+            return [full] * n
+        pat = [0] * n
+        for i in range(n - 1, n - 1 - bracket, -1):
+            pat[i] = full
+        pat[n - 1 - bracket] = int(((percentage % step) * brightness * 85.333) / step) & 0xFF
+        return pat
+
+    def get_record(self, region):
+        cmd = [0xD2, 0x02, 0x01, 0x08, region]
+        self.set(cmd)
+        rec = self.get(cmd)
+        if not any(rec[6:12]):
+            return None
+        return rec
+
+    def set_flag(self, region, status):
+        rec = self.get_record(region)
+        if rec is None:
+            return
+        rec[1], rec[2], rec[8] = 0xD3, 0x03, 0x01 if status else 0x00
+        self.set_raw(rec)
+
+    def set_lighting_on_battery(self, status):
+        self.set([0xD8, 0x01, 0x00, 0x01, 0x00 if status else 0x80])
+
+    def set_lighting_on_lid_close(self, status):
+        self.set([0xD8, 0x00, 0x00, 0x02, 0xA5, 0x00 if status else 0x80])
+
+
+def op_slash(a):
+    path = _slash_device()
+    if not path:
+        raise OpError("Slash-Gerät (0B05:19B6, Report 0x5D) nicht gefunden")
+    mode = a.get("mode")
+    if mode not in SLASH_CODES and mode not in SLASH_SPECIAL:
+        raise OpError(f"unbekannter Slash-Modus {mode!r}")
+    brightness = _int(a.get("brightness", 0), 0, 3, "Helligkeit")
+    interval = _int(a.get("interval", 0), 0, 5, "Intervall")
+    length = 35 if a.get("long", True) else 7
+    s = Slash(path, length)
+    try:
+        if a.get("wake"):
+            s.wake_up()
+        if brightness == 0:
+            s.set_enabled(False)
+        else:
+            s.set_enabled(True)
+            if mode == "Dark":
+                s.init()
+                s.set_flag(0xAB, False)
+            elif mode == "Ladezustand":
+                pct = max(0.0, min(100.0, float(a.get("battery", 100))))
+                s.set_custom(s.percentage_pattern(brightness, pct))
+            else:
+                code = SLASH_CODES.get(mode, SLASH_CODES["Static"])
+                s.init()
+                s.set_mode(code)
+                s.set_options(True, brightness, interval)
+                s.save()
+        if a.get("options"):
+            o = a["options"]
+            s.set_lighting_on_battery(not bool(o.get("off_on_battery")))
+            s.set_lighting_on_lid_close(not bool(o.get("off_on_lid")))
+            s.set_flag(0xA0, bool(o.get("show_on_boot")))
+            s.set_flag(0xA4, bool(o.get("show_on_boot")))
+            s.set_flag(0xA1, bool(o.get("show_on_sleep")))
+            s.set_flag(0xA2, bool(o.get("battery_warning")))
+    except OSError as e:
+        raise OpError(f"HID: {e.strerror or e}")
+    finally:
+        s.close()
+    return f"{mode}, Helligkeit {brightness}"
+
+
+# ----------------------------------------------------------------------------
+# Tastatur-Aura – Port von G-Helper USB/Aura.cs + AsusHid.cs
+#   Farbe/Modus: Output-Report 0x5D: B3 (AuraMessage) → B5 (SET) → B4 (APPLY)
+#   Helligkeit:  Feature-Report 0x5A: BA C5 C4 <0..3>  (AsusHid.WriteInput)
+# ----------------------------------------------------------------------------
+AURA_PIDS = {0x1A30, 0x1854, 0x1869, 0x1866, 0x19B6, 0x1822, 0x1837, 0x184A, 0x183D, 0x8502, 0x1807,
+             0x17E0, 0x1ABE, 0x1B4C, 0x1B6E, 0x1B2C, 0x8854, 0x1CE7, 0x1CE6, 0x1BF2, 0x1BF3, 0x1CD7,
+             0x1CD8, 0x4B42}
+AURA_MODES = {0, 1, 2, 3, 10}          # Static, Breathe, ColorCycle, Rainbow, Strobe
+AURA_SPEEDS = {0xE1, 0xEB, 0xF5}       # Slow, Normal, Fast
+
+
+def _report_sizes(rd):
+    """Report-Deskriptor → {(id, 'input'|'output'|'feature'): Bytes ohne ID}"""
+    i, rid, size, count, rep = 0, 0, 0, 0, {}
+    while i < len(rd):
+        b = rd[i]
+        s = b & 3
+        s = 4 if s == 3 else s
+        tag = b & 0xFC
+        val = int.from_bytes(rd[i + 1:i + 1 + s], "little")
+        i += 1 + s
+        if tag == 0x84:
+            rid = val
+        elif tag == 0x74:
+            size = val
+        elif tag == 0x94:
+            count = val
+        elif tag in (0x80, 0x90, 0xB0):
+            k = {0x80: "input", 0x90: "output", 0xB0: "feature"}[tag]
+            rep[(rid, k)] = rep.get((rid, k), 0) + size * count // 8
+    return rep
+
+
+def _aura_devices():
+    out = []
+    for d in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        ue = _read(os.path.join(d, "device", "uevent")) or ""
+        hid = next((l.split("=", 1)[1] for l in ue.splitlines() if l.startswith("HID_ID=")), "")
+        parts = hid.split(":")
+        if len(parts) != 3 or int(parts[1], 16) != 0x0B05 or int(parts[2], 16) not in AURA_PIDS:
+            continue
+        try:
+            with open(os.path.join(d, "device", "report_descriptor"), "rb") as f:
+                sizes = _report_sizes(f.read())
+        except OSError:
+            continue
+        out.append(("/dev/" + os.path.basename(d), sizes))
+    return out
+
+
+def _hid_send(fd, data, length, feature):
+    import fcntl
+    buf = bytearray(length)
+    buf[:len(data)] = bytes(data)
+    if feature:
+        fcntl.ioctl(fd, _ioc(0x06, length), buf)
+    else:
+        os.write(fd, bytes(buf))
+
+
+def op_aura(a):
+    mode = _int(a.get("mode", 0), 0, 10, "Aura-Modus")
+    if mode not in AURA_MODES:
+        raise OpError(f"Aura-Modus {mode} nicht erlaubt")
+    r, g, b = (_int(a.get(k, 0), 0, 255, k) for k in ("r", "g", "b"))
+    speed = _int(a.get("speed", 0xEB), 0, 255, "Geschwindigkeit")
+    if speed not in AURA_SPEEDS:
+        speed = 0xEB
+    brightness = a.get("brightness")
+    if brightness is not None:
+        brightness = _int(brightness, 0, 3, "Helligkeit")
+    done = 0
+    for path, sizes in _aura_devices():
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            if (0x5D, "output") in sizes or (0x5D, "feature") in sizes:
+                feature = (0x5D, "output") not in sizes
+                n = 1 + sizes.get((0x5D, "feature" if feature else "output"), 63)
+                msg = [0x5D, 0xB3, 0x00, mode, r, g, b, speed, 0x00,
+                       0xFF if (r, g, b) == (0, 0, 0) else (0x01 if mode == 1 else 0x00), r, g, b]
+                for m in ([0x5D, 0xB9], [0x5D] + list(b"ASUS Tech.Inc."), msg, [0x5D, 0xB5, 0, 0, 0], [0x5D, 0xB4]):
+                    _hid_send(fd, m, n, feature)
+                done += 1
+            if brightness is not None and (0x5A, "feature") in sizes:
+                n = 1 + sizes[(0x5A, "feature")]
+                _hid_send(fd, [0x5A] + list(b"ASUS Tech.Inc."), n, True)
+                _hid_send(fd, [0x5A, 0xBA, 0xC5, 0xC4, brightness], n, True)
+        except OSError as e:
+            raise OpError(f"HID {path}: {e.strerror or e}")
+        finally:
+            os.close(fd)
+    if not done:
+        raise OpError("keine ASUS-Aura-Tastatur gefunden")
+    if brightness is not None:
+        led = "/sys/class/leds/asus::kbd_backlight/brightness"
+        if os.path.exists(led):
+            try:
+                _write(led, brightness)
+            except OpError:
+                pass
+    return f"Modus {mode}, #{r:02x}{g:02x}{b:02x}" + (f", Helligkeit {brightness}" if brightness is not None else "")
+
+
+OPS = {
+    "slash": op_slash,
+    "aura": op_aura,
+    "platform_profile": op_platform_profile,
+    "epp": op_epp,
+    "cpu_boost": op_cpu_boost,
+    "armoury": op_armoury,
+    "rapl": op_rapl,
+    "temp_limit": op_temp_limit,
+    "fan_curve": op_fan_curve,
+    "charge_limit": op_charge_limit,
+    "fn_lock": op_fn_lock,
+    "service": op_service,
+}
+
+
+def restore():
+    v = _read(CHARGE_FILE)
+    if v and v.isdigit():
+        try:
+            op_charge_limit({"value": int(v)})
+            print(f"Ladelimit {v}% wiederhergestellt")
+        except OpError as e:
+            print(f"Fehler: {e}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def main():
+    if os.geteuid() != 0:
+        print(json.dumps({"error": "muss als root laufen (pkexec)"}))
+        return 2
+    if "--restore" in sys.argv[1:]:
+        return restore()
+    try:
+        req = json.loads(sys.stdin.read(1_000_000) or "{}")
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"ungültiges JSON: {e}"}))
+        return 2
+    ops = req.get("ops", [])
+    if not isinstance(ops, list) or len(ops) > 64:
+        print(json.dumps({"error": "ops muss eine Liste (≤64) sein"}))
+        return 2
+    results = []
+    for a in ops:
+        if not isinstance(a, dict):
+            results.append({"op": None, "ok": False, "msg": "ungültiger Eintrag"})
+            continue
+        name = a.get("op")
+        fn = OPS.get(name)
+        if fn is None:
+            results.append({"op": name, "ok": False, "msg": "unbekannte Operation"})
+            continue
+        try:
+            results.append({"op": name, "ok": True, "msg": str(fn(a))})
+        except OpError as e:
+            results.append({"op": name, "ok": False, "msg": str(e)})
+        except Exception as e:  # noqa: BLE001 – nie mit Traceback abbrechen
+            results.append({"op": name, "ok": False, "msg": f"{type(e).__name__}: {e}"})
+    print(json.dumps({"results": results}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

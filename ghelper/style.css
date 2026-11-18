@@ -1,0 +1,212 @@
+/* G-Helper Linux – 1:1 nach G-Helper Dark Theme (RForm.cs / RButton.cs / Slider.cs)
+ *
+ * formBack     #1C1C1C   foreMain   #F0F0F0
+ * buttonMain   #2E2E2E   buttonSecond #242424
+ * borderMain   #373737   borderSecond #2A2A2A
+ * chartMain    #232323   chartGrid  #464646
+ * colorEco     #06B48A   colorStandard #3AAEEF
+ * colorTurbo   #FF2020   colorCustom   #FF8000   colorGray #A8A8A8
+ */
+
+/* Neutralisiert Eigenheiten fremder GTK-Themes (Fluent, WhiteSur …) innerhalb der App */
+window.ghelper button, window.ghelper dropdown > button, window.ghelper checkbutton check,
+window.ghelper scale, window.ghelper scale > trough, window.ghelper scale > trough > slider {
+  outline: none;
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+  transition: none;
+}
+window.ghelper button:focus-visible { outline: none; }
+window.ghelper label { text-shadow: none; }
+window.ghelper, window.ghelper * { font-family: "Segoe UI", "Inter", "Cantarell", sans-serif; }
+
+window.ghelper,
+window.ghelper .gh-root {
+  background-color: #1C1C1C;
+  color: #F0F0F0;
+}
+
+window.ghelper headerbar {
+  background-color: #1C1C1C;
+  color: #F0F0F0;
+  box-shadow: none;
+  border-bottom: 1px solid #2A2A2A;
+  min-height: 32px;
+}
+window.ghelper headerbar .title { font-weight: 400; font-size: 12px; }
+
+.gh-root label { font-size: 12px; }               /* Segoe UI 9pt */
+
+/* ---------- Abschnittstitel (Icon 16px + fett) ---------- */
+.gh-section { margin: 0 10px 2px 10px; min-height: 20px; }
+.gh-section-title { font-weight: 700; color: #F0F0F0; }
+.gh-section-right { color: #F0F0F0; }
+.gh-dim-label { color: #A8A8A8; }
+.gh-panel { margin: 10px 10px 4px 10px; }        /* Padding 20 @200% */
+
+/* ---------- RButton: Kachel ---------- */
+button.gh-tile {
+  background-image: none;
+  background-color: #2E2E2E;
+  color: #F0F0F0;
+  border-radius: 5px;
+  border: 1px solid #373737;
+  border-top-color: #4B4B4B;                       /* RestTopLighten 0.1 */
+  box-shadow: none;
+  min-height: 60px;                                /* 120 @200% */
+  padding: 2px;
+  margin: 2px;
+  font-weight: 400;
+}
+button.gh-tile.secondary { background-color: #242424; border-color: #2A2A2A; border-top-color: #3F3F3F; }
+button.gh-tile.short { min-height: 40px; }
+button.gh-tile:hover { background-color: #363636; }
+button.gh-tile.secondary:hover { background-color: #2C2C2C; }
+button.gh-tile:disabled { color: #808080; background-color: #262626; }
+button.gh-tile:disabled image { opacity: 0.35; }
+
+/* aktiv: 2px Rahmen in Modusfarbe, oben aufgehellt (ActiveTopLighten 0.15),
+   Hintergrund-Verlauf Alpha 32/255 bis 20 % der Höhe (ActiveBg*) */
+button.gh-tile.active { border-width: 2px; padding: 1px; }
+button.gh-tile.active.eco {
+  border-color: #06B48A; border-top-color: #2BBF9C;
+  background-image: linear-gradient(to bottom, rgba(6,180,138,0.125), rgba(6,180,138,0) 20%);
+}
+button.gh-tile.active.standard {
+  border-color: #3AAEEF; border-top-color: #58BAF1;
+  background-image: linear-gradient(to bottom, rgba(58,174,239,0.125), rgba(58,174,239,0) 20%);
+}
+button.gh-tile.active.turbo {
+  border-color: #FF2020; border-top-color: #FF4141;
+  background-image: linear-gradient(to bottom, rgba(255,32,32,0.125), rgba(255,32,32,0) 20%);
+}
+button.gh-tile.active.custom {
+  border-color: #FF8000; border-top-color: #FF9326;
+  background-image: linear-gradient(to bottom, rgba(255,128,0,0.125), rgba(255,128,0,0) 20%);
+}
+button.gh-tile.active.gray {
+  border-color: #A8A8A8; border-top-color: #B9B9B9;
+  background-image: linear-gradient(to bottom, rgba(168,168,168,0.125), rgba(168,168,168,0) 20%);
+}
+button.gh-tile.busy { border-style: dashed; border-color: #A8A8A8; }
+
+/* ---------- RButton: kleine/sekundäre Buttons ---------- */
+button.gh-btn {
+  background-image: none;
+  background-color: #242424;
+  color: #F0F0F0;
+  border: 1px solid #2A2A2A;
+  border-top-color: #3F3F3F;
+  border-radius: 5px;
+  box-shadow: none;
+  min-height: 30px;
+  padding: 0 8px;
+  margin: 2px;
+}
+button.gh-btn.main { background-color: #2E2E2E; border-color: #373737; border-top-color: #4B4B4B; }
+button.gh-btn:hover { background-color: #303030; }
+button.gh-btn.tiny { min-height: 22px; padding: 0 6px; font-size: 11px; }
+button.gh-btn.on-standard { background-color: #3AAEEF; border-color: #3AAEEF; color: #FFFFFF; }
+button.gh-btn.on-eco { background-color: #06B48A; border-color: #06B48A; color: #FFFFFF; }
+
+/* ---------- RComboBox ---------- */
+dropdown.gh-drop > button,
+dropdown.gh-drop > button:checked {
+  background-image: none;
+  background-color: #2E2E2E;
+  color: #F0F0F0;
+  border: 1px solid #373737;
+  border-radius: 5px;
+  box-shadow: none;
+  min-height: 28px;
+  padding: 0 6px;
+  margin: 2px;
+}
+dropdown.gh-drop > button:hover { background-color: #363636; }
+window.ghelper popover > contents {
+  background-color: #2E2E2E;
+  color: #F0F0F0;
+  border: 1px solid #373737;
+  border-radius: 5px;
+}
+window.ghelper popover listview row:hover,
+window.ghelper popover listview row:selected { background-color: #3AAEEF; color: #FFFFFF; }
+
+/* ---------- Slider.cs: Balken 15 % in chartGrid, Füllung colorStandard,
+              Knopf = weißer Kreis (r = 0.4·h) mit Akzent-Innenkreis 12/22 ---------- */
+scale.gh-scale { padding: 8px 9px; min-height: 20px; }
+scale.gh-scale > trough {
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  background-color: #464646;
+  min-height: 3px;
+  border-radius: 0;
+}
+scale.gh-scale > trough > highlight {
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  background-color: #3AAEEF;
+  border-radius: 0;
+}
+scale.gh-scale > trough > slider {
+  background-color: #FFFFFF;
+  background-image: radial-gradient(circle closest-side, #3AAEEF 0%, #3AAEEF 53%, #FFFFFF 57%, #FFFFFF 100%);
+  border: none;
+  border-radius: 50%;
+  min-width: 16px;
+  min-height: 16px;
+  margin: -7px;
+  box-shadow: none;
+}
+scale.gh-scale > trough > slider:hover {
+  background-image: radial-gradient(circle closest-side, #3AAEEF 0%, #3AAEEF 70%, #FFFFFF 74%, #FFFFFF 100%);
+}
+scale.gh-scale:disabled > trough > highlight { background-color: #5A5A5A; }
+scale.gh-scale:disabled > trough > slider { background-image: none; background-color: #6A6A6A; }
+
+/* ---------- RCheckBox ---------- */
+checkbutton.gh-check { color: #F0F0F0; }
+checkbutton.gh-check { padding: 2px 0; }
+checkbutton.gh-check check {
+  padding: 0;
+  margin: 0 6px 0 0;
+  -gtk-icon-size: 12px;
+  box-shadow: none;
+  background-image: none;
+  background-color: #1C1C1C;
+  border: 1px solid #A8A8A8;
+  border-radius: 3px;
+  min-width: 14px;
+  min-height: 14px;
+}
+checkbutton.gh-check check:checked {
+  background-color: #3AAEEF;
+  border-color: #3AAEEF;
+  color: #FFFFFF;
+}
+
+/* ---------- Lüfter-Fenster ---------- */
+button.gh-tab {
+  background-image: none;
+  background-color: #2E2E2E;
+  color: #F0F0F0;
+  border: 2px solid #3AAEEF;
+  border-radius: 5px;
+  min-height: 28px;
+  min-width: 70px;
+  box-shadow: none;
+  background-image: linear-gradient(to bottom, rgba(58,174,239,0.125), rgba(58,174,239,0) 20%);
+}
+.gh-value { color: #F0F0F0; }
+
+/* ---------- Versionszeile ---------- */
+label.gh-version { color: #A8A8A8; text-decoration: underline; }
+label.gh-version.update { color: #FF2020; }
+
+/* ---------- Farbfeld ---------- */
+.gh-swatch { border: 1px solid #A8A8A8; min-width: 12px; min-height: 12px; }
+
+/* ---------- Extra-Fenster ---------- */
+entry.gh-entry { background-color: #2E2E2E; color: #F0F0F0; border: 1px solid #373737; border-radius: 5px; min-height: 26px; }
