@@ -296,13 +296,15 @@ class Controller:
         if self.gpu_busy:
             self.toast("GPU-Umschaltung läuft bereits …")
             return
-        if self.caps.get("nvidia") and not force_supergfx and not self.dry_run:
-            if target == "eco" and hw.nvidia_driver_loaded():
+        # Eco <-> Standard immer direkt über den Root-Helfer (ohne Abmelden, ohne supergfxd).
+        # Nur Ultimativ (MUX) läuft über supergfxctl und braucht einen Neustart.
+        if self.caps.get("nvidia") and not force_supergfx and not self.dry_run \
+                and target in ("eco", "standard") and self.gpu_hw != "ultimate":
+            if target == "eco":
                 self._eco_now(from_auto)
-                return
-            if target == "standard" and self.gpu_hw == "eco":
+            else:
                 self._standard_now()
-                return
+            return
         if self.dry_run:
             self.toast(f"[dry-run] GPU → {target}")
             return
@@ -395,13 +397,14 @@ class Controller:
                 return
             users = [u for u in users if u.get("pid") != os.getpid()]
             if any(u.get("protected") for u in users):
-                # Desktop (gnome-shell/Xwayland) hält die Karte → supergfxd schaltet beim Abmelden
+                # Systemprozess hält die Karte → nicht abmelden, nur Bescheid geben
                 self.gpu_busy = False
+                names = ", ".join(sorted({u["name"] for u in users if u.get("protected")}))
                 if from_auto:
-                    print("[gpu] Eco übersprungen: Desktop nutzt die dGPU")
-                    self.refresh_gpu()
-                    return
-                self._switch_gpu("eco", force_supergfx=True)
+                    print("[gpu] Eco übersprungen: dGPU wird benutzt von", names)
+                else:
+                    self.toast(f"Eco gerade nicht möglich – die dGPU wird benutzt von: {names}")
+                self.refresh_gpu()
                 return
             if users and kill is None:
                 self.gpu_busy = False

@@ -488,6 +488,13 @@ def gpu_mode():
     dg = armoury_attr("dgpu_disable")
     if dg and dg["current"] == 1:
         return "eco"
+    if has_dgpu() and (dg or mux):
+        # direkt an der Hardware ablesen (supergfxd kann danebenliegen):
+        # dGPU auf dem PCI-Bus → Standard, sonst Eco (Karte entfernt)
+        on_bus = any((read(os.path.join(d, "class")) or "").startswith("0x03")
+                     and read(os.path.join(d, "boot_vga")) == "0"
+                     for d in glob.glob("/sys/bus/pci/devices/*"))
+        return "standard" if on_bus else "eco"
     ok, out = run(["supergfxctl", "-g"], timeout=5)
     if ok:
         return GFX_TO_UI.get(out.strip().splitlines()[-1].strip())

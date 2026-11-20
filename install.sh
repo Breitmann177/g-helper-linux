@@ -102,7 +102,7 @@ green "GTK-Programme zeichnen über die Intel-Grafik (NVIDIA bleibt frei für Ec
 # Rückgängig: rm ~/.config/environment.d/90-g-helper-linux.conf (dann ab-/anmelden)
 mkdir -p "$HOME/.config/environment.d"
 printf '%s\n' "# G-Helper Linux: GTK4 nur über OpenGL (Intel) zeichnen, damit Eco sofort schalten kann" \
-    "GSK_RENDERER=ngl" > "$HOME/.config/environment.d/90-g-helper-linux.conf"
+    "GSK_RENDERER=gl" > "$HOME/.config/environment.d/90-g-helper-linux.conf"
 
 green "Desktop-Eintrag und Icon"
 sudo install -m 0644 "$SRC/data/g-helper-linux.desktop" /usr/share/applications/
