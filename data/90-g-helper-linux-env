@@ -1,0 +1,24 @@
+#!/bin/sh
+# G-Helper Linux: systemd-Umgebungsgenerator (läuft beim Anmelden).
+#
+# Programme laden beim Start die Grafik-Bibliotheken aller Karten (EGL über glvnd,
+# Vulkan-Loader) und öffnen dabei auch die NVIDIA-Karte – dann kann Eco sie nicht
+# abschalten, ohne Programme wie Browser oder Terminal zu beenden.
+# Hier sehen normale Programme nur die Intel-Grafik. „Mit dedizierter Grafikkarte
+# starten“ (GNOME/switcheroo) setzt VK_LOADER_DRIVERS_SELECT=*nvidia* und GLX auf
+# NVIDIA – Spiele (Vulkan/Proton, GLX) laufen damit weiterhin auf der NVIDIA-Karte.
+#
+# Nur im Hybrid-Betrieb (gpu_mux_mode=1). Bei MUX = Ultimativ hängt der Bildschirm
+# an der NVIDIA-Karte; dann wird nichts gesetzt.
+
+mux=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/gpu_mux_mode/current_value 2>/dev/null \
+      || cat /sys/devices/platform/asus-nb-wmi/gpu_mux_mode 2>/dev/null)
+[ "$mux" = "1" ] || exit 0
+
+mesa_egl=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+[ -f "$mesa_egl" ] || exit 0
+
+echo "GSK_RENDERER=gl"
+echo "__EGL_VENDOR_LIBRARY_FILENAMES=$mesa_egl"
+ls /usr/share/vulkan/icd.d/intel_icd.*.json >/dev/null 2>&1 && echo "VK_LOADER_DRIVERS_SELECT=*intel*"
+exit 0

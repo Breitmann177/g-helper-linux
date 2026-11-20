@@ -685,13 +685,9 @@ SUPERGFX_CONF = "/etc/supergfxd.conf"
 
 
 def _supergfx_set_mode(mode):
-    """supergfxd-Konfiguration setzen.
-
-    Für Eco/Standard immer „Hybrid“: Eco übersteht den Neustart ohnehin über dgpu_disable=1
-    (wird in der Firmware gespeichert). Steht supergfxd dagegen auf „Integrated“, während die
-    Karte an ist (z. B. nach einem abgebrochenen Wechsel), versucht er beim Booten den
-    NVIDIA-Treiber zu entladen, während der Desktop ihn benutzt. Dann hängt „rmmod nvidia“
-    im Kernel fest, die GPU ist tot und auch Herunterfahren hängt minutenlang."""
+    """supergfxd-Konfiguration setzen. Eco → „Integrated“ (sonst schaltet supergfxd die dGPU
+    bei seinem Neustart wieder ein), Standard → „Hybrid“. Dass beides nie im Widerspruch zur
+    Hardware steht, stellt zusätzlich ghelper-supergfx-sync vor jedem Start von supergfxd sicher."""
     try:
         with open(SUPERGFX_CONF) as f:
             conf = json.load(f)
@@ -726,7 +722,6 @@ class _SupergfxPaused:
 
 def op_gpu_eco(a):
     with _SupergfxPaused():
-        _supergfx_set_mode("Hybrid")    # vorab: auch ein Fehler mittendrin lässt nie „Integrated“ zurück
         return _gpu_eco(a)
 
 
@@ -744,25 +739,37 @@ def _gpu_eco(a):
     if _read(dg) == "1":
         return "bereits Eco"
     caller = _caller_uid()
-    # 1) gewünschte Programme beenden – nur eigene, nie geschützte
-    wanted = {int(x) for x in (a.get("kill") or []) if str(x).isdigit()}
-    users = _gpu_users()
-    for pid, uid, name in users:
-        if pid in wanted and uid == caller and uid != 0 and name not in PROTECTED:
+
+    def may_kill(uid, name):
+        # Eigene Programme des Aufrufers und Dienst-Benutzer (z. B. ollama → llama-server),
+        # nie root, nie andere echte Benutzer, nie den Desktop selbst
+        return name not in PROTECTED and uid != 0 and (uid == caller or uid < 1000)
+
+    # 1) Programme beenden, die die Karte offen halten. kill="all": alle erlaubten ohne Rückfrage.
+    #    Mehrere Runden, weil sich Programme die Karte zwischendurch neu öffnen können
+    #    (z. B. über D-Bus neu gestartet).
+    kill_all = a.get("kill") == "all"
+    wanted = set() if kill_all else {int(x) for x in (a.get("kill") or []) if str(x).isdigit()}
+    closed = set()
+    for _ in range(4):
+        targets = [(p, n) for p, u, n in _gpu_users() if may_kill(u, n) and (kill_all or p in wanted)]
+        if not targets:
+            break
+        for pid, name in targets:
+            closed.add(name)
             try:
                 os.kill(pid, signal.SIGTERM)
             except OSError:
                 pass
-    deadline = time.time() + 5
-    while time.time() < deadline and any(p in wanted for p, _, _ in _gpu_users()):
-        time.sleep(0.25)
-    for pid, uid, name in _gpu_users():
-        if pid in wanted and uid == caller and uid != 0 and name not in PROTECTED:
+        deadline = time.time() + 3
+        while time.time() < deadline and any(p in {t for t, _ in targets} for p, _, _ in _gpu_users()):
+            time.sleep(0.2)
+        for pid, _ in targets:
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-    time.sleep(0.3)
+        time.sleep(0.3)
     left = _gpu_users()
     if left:
         raise OpError("BUSY:" + json.dumps(sorted({n for _, _, n in left})))
@@ -777,7 +784,8 @@ def _gpu_eco(a):
             raise OpError("NVIDIA-Treiber ließ sich nicht entladen: " + (r.stderr.strip() or "in Benutzung"))
     # 3) dGPU abschalten
     _write(dg, 1)
-    return "Eco"
+    _supergfx_set_mode("Integrated")
+    return "Eco" + (" – beendet: " + ", ".join(sorted(closed)) if closed else "")
 
 
 def op_gpu_standard(a):

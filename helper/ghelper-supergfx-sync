@@ -1,0 +1,56 @@
+#!/usr/bin/python3 -I
+"""
+G-Helper Linux – supergfxd-Modus vor jedem Start von supergfxd an die Hardware angleichen.
+Läuft als ExecStartPre von supergfxd.service (systemd-Drop-in, als root).
+
+  dGPU aus (dgpu_disable=1) + Modus „Hybrid“      → supergfxd würde die Karte wieder
+                                                     einschalten  → „Integrated“
+  dGPU an  (dgpu_disable=0) + Modus „Integrated“  → supergfxd würde „rmmod nvidia“ ausführen,
+                                                     während der Desktop den Treiber benutzt;
+                                                     das hängt im Kernel (GPU tot, Herunter-
+                                                     fahren hängt minutenlang) → „Hybrid“
+
+Andere Modi (Ultimativ/AsusMuxDgpu, Vfio, …) bleiben unberührt.
+"""
+import json
+import os
+import sys
+
+CONF = "/etc/supergfxd.conf"
+DGPU_DISABLE = (
+    "/sys/class/firmware-attributes/asus-armoury/attributes/dgpu_disable/current_value",
+    "/sys/devices/platform/asus-nb-wmi/dgpu_disable",
+)
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def main():
+    dg = next((v for v in map(read, DGPU_DISABLE) if v in ("0", "1")), None)
+    if dg is None:
+        return 0
+    try:
+        with open(CONF) as f:
+            conf = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    mode = conf.get("mode")
+    want = {("1", "Hybrid"): "Integrated", ("0", "Integrated"): "Hybrid"}.get((dg, mode))
+    if not want:
+        return 0
+    conf["mode"] = want
+    with open(CONF + ".tmp", "w") as f:
+        json.dump(conf, f, indent=2)
+    os.replace(CONF + ".tmp", CONF)
+    print(f"supergfxd-Modus an Hardware angeglichen: {mode} → {want} (dgpu_disable={dg})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

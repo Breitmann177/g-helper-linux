@@ -406,16 +406,15 @@ class Controller:
                     self.toast(f"Eco gerade nicht möglich – die dGPU wird benutzt von: {names}")
                 self.refresh_gpu()
                 return
-            if users and kill is None:
+            if users and from_auto:
+                # automatischer Wechsel (z. B. Netzteil ab): nie ungefragt Programme beenden
                 self.gpu_busy = False
                 self.refresh_gpu()
-                if from_auto:
-                    print("[gpu] Eco übersprungen: Programme nutzen die dGPU:", [u["name"] for u in users])
-                    return
-                names = sorted({u["name"] for u in users})
-                self.ask_kill_apps(names, lambda: self._eco_now(kill=[u["pid"] for u in users]))
+                print("[gpu] Eco übersprungen: Programme nutzen die dGPU:", [u["name"] for u in users])
                 return
-            self.helper.submit([{"op": "gpu_eco", "kill": kill or []}], done)
+            # Eco von Hand: Karte einfach ausschalten – Programme, die sie offen halten, werden
+            # vom Root-Helfer beendet (auch Dienste wie ollama/llama-server), ohne Rückfrage.
+            self.helper.submit([{"op": "gpu_eco", "kill": "all"}], done)
 
         def done(res):
             self.gpu_busy = False
@@ -423,6 +422,8 @@ class Controller:
             if r.get("ok"):
                 self.gpu_pending = None
                 self.osd("GPU Modus", GPU_LABELS["eco"])
+                if "beendet:" in (r.get("msg") or ""):
+                    self.toast("Eco: " + r["msg"].split("beendet:", 1)[1].strip() + " beendet (hat die dGPU benutzt)")
             else:
                 msg = r.get("msg", "")
                 if msg.startswith("BUSY:"):

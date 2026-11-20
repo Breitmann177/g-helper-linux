@@ -49,6 +49,10 @@ sudo chmod -R u=rwX,go=rX "$PREFIX"
 green "Root-Helfer nach $LIBEXEC installieren"
 sudo install -d -m 0755 "$LIBEXEC"
 sudo install -m 0755 -o root -g root "$SRC/helper/ghelper-helper" "$LIBEXEC/ghelper-helper"
+sudo install -m 0755 -o root -g root "$SRC/helper/ghelper-supergfx-sync" "$LIBEXEC/ghelper-supergfx-sync"
+# supergfxd vor jedem Start an den echten GPU-Zustand angleichen
+sudo install -D -m 0644 "$SRC/data/supergfxd-g-helper-linux.conf" /etc/systemd/system/supergfxd.service.d/g-helper-linux.conf
+sudo systemctl daemon-reload
 
 green "Starter /usr/local/bin/g-helper-linux"
 sudo tee /usr/local/bin/g-helper-linux >/dev/null <<EOF
@@ -96,13 +100,14 @@ if [[ -f /etc/supergfxd.conf ]] && ! grep -q '"logout_timeout_s": 0' /etc/superg
     sudo systemctl restart supergfxd.service
 fi
 
-green "GTK-Programme zeichnen über die Intel-Grafik (NVIDIA bleibt frei für Eco)"
-# GTK4 öffnet sonst über Vulkan alle Grafikkarten – auch die NVIDIA-Karte – und
-# blockiert damit das sofortige Abschalten (Eco). Spiele/CUDA sind davon nicht betroffen.
-# Rückgängig: rm ~/.config/environment.d/90-g-helper-linux.conf (dann ab-/anmelden)
-mkdir -p "$HOME/.config/environment.d"
-printf '%s\n' "# G-Helper Linux: GTK4 nur über OpenGL (Intel) zeichnen, damit Eco sofort schalten kann" \
-    "GSK_RENDERER=gl" > "$HOME/.config/environment.d/90-g-helper-linux.conf"
+green "Programme zeichnen über die Intel-Grafik (NVIDIA bleibt frei für Eco)"
+# Programme öffnen beim Start sonst über EGL/Vulkan auch die NVIDIA-Karte (Browser,
+# Terminal, …) und blockieren damit Eco. Der Generator setzt das beim Anmelden nur im
+# Hybrid-Betrieb; „Mit dedizierter Grafikkarte starten“ nutzt weiterhin NVIDIA.
+# Rückgängig: rm ~/.config/systemd/user-environment-generators/90-g-helper-linux (dann ab-/anmelden)
+rm -f "$HOME/.config/environment.d/90-g-helper-linux.conf"      # Vorgänger (nur GSK_RENDERER=gl)
+install -D -m 0755 "$SRC/data/90-g-helper-linux-env" \
+    "$HOME/.config/systemd/user-environment-generators/90-g-helper-linux"
 
 green "Desktop-Eintrag und Icon"
 sudo install -m 0644 "$SRC/data/g-helper-linux.desktop" /usr/share/applications/
