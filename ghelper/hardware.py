@@ -314,6 +314,17 @@ def has_dgpu():
 
 
 def has_nvidia():
+    """NVIDIA-dGPU vorhanden? Im Eco-Modus ist die Karte vom PCI-Bus verschwunden –
+    dann zählt, ob es einen dGPU-Schalter gibt und der NVIDIA-Treiber installiert ist."""
+    if Path("/sys/module/nvidia").exists():
+        return True
+    if has_dgpu() and not any((read(os.path.join(d, "class")) or "").startswith("0x03")
+                              and read(os.path.join(d, "vendor")) == "0x1002"
+                              and read(os.path.join(d, "boot_vga")) == "0"
+                              for d in glob.glob("/sys/bus/pci/devices/*")):
+        ok, out = run(["modinfo", "-n", "nvidia"], timeout=5)
+        if ok and out.strip():
+            return True
     return any(read(os.path.join(d, "vendor")) == "0x10de"
                and (read(os.path.join(d, "class")) or "").startswith("0x03")
                for d in glob.glob("/sys/bus/pci/devices/*"))
@@ -435,10 +446,30 @@ class RootHelper:
 GFX_TO_UI = {"Integrated": "eco", "Hybrid": "standard", "AsusMuxDgpu": "ultimate",
              "NvidiaNoModeset": "standard", "Vfio": "eco", "AsusEgpu": "standard"}
 UI_TO_GFX = {"eco": "Integrated", "standard": "Hybrid", "ultimate": "AsusMuxDgpu"}
+GPU_SWITCH_TIMEOUT = 20      # Sekunden, danach gilt die Umschaltung als fehlgeschlagen
 
 
 def nvidia_driver_loaded():
     return Path("/sys/module/nvidia").exists()
+
+
+ECO_BLOCKED_MSG = ("Der NVIDIA-Treiber ist geladen (die dGPU wird z. B. von gnome-shell genutzt). "
+                   "Eco ist nur möglich, wenn das Modul „nvidia“ nicht geladen ist – "
+                   "z. B. nach einem Neustart mit module_blacklist=nvidia.")
+
+
+def eco_blocked():
+    """Sofortiges Abschalten (dgpu_disable) ist nur sicher, solange /sys/module/nvidia NICHT
+    existiert. Ist der Treiber geladen, läuft Eco über supergfxctl und wird beim Abmelden fertig."""
+    return nvidia_driver_loaded()
+
+
+def gpu_pending_mode():
+    """→ eco | standard | ultimate | None – von supergfxd vorgemerkter Moduswechsel."""
+    ok, out = run(["supergfxctl", "-P"], timeout=5)
+    if not ok:
+        return None
+    return GFX_TO_UI.get(out.strip().splitlines()[-1].strip()) if out.strip() else None
 
 
 def nvidia_blacklisted():
@@ -474,10 +505,11 @@ def gpu_pending():
 def set_gpu_mode(ui_mode):
     """Blockierend – über run_async aufrufen. → (ok, msg, reboot_needed)"""
     target = UI_TO_GFX[ui_mode]
-    ok, out = run(["supergfxctl", "-m", target], timeout=60)
+    ok, out = run(["supergfxctl", "-m", target], timeout=GPU_SWITCH_TIMEOUT)
     low = out.lower()
     reboot = "reboot" in low or "restart" in low or ui_mode == "ultimate"
-    return ok, out, reboot
+    logout = "logout" in low or "log out" in low
+    return ok, out, reboot, logout
 
 
 # ---------------------------------------------------------------------------

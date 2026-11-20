@@ -12,5 +12,5 @@ sudo rm -f /usr/local/bin/g-helper-linux \
     /usr/share/applications/g-helper-linux.desktop \
     /usr/share/icons/hicolor/scalable/apps/g-helper-linux.svg
 sudo udevadm control --reload-rules
-rm -f "$HOME/.config/autostart/g-helper-linux.desktop"
+rm -f "$HOME/.config/autostart/g-helper-linux.desktop" "$HOME/.config/environment.d/90-g-helper-linux.conf"
 echo "G-Helper Linux entfernt."

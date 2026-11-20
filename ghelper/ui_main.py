@@ -29,6 +29,8 @@ GPU_TILES = [("eco", "Eco", "eco", "eco", "dGPU zum Stromsparen abschalten"),
              ("optimized", "Optimiert", "optimized", "eco",
               "Eco-Modus im Batteriebetrieb. Standard, wenn eingesteckt.")]
 
+GPU_TIPS = {g[0]: g[4] for g in GPU_TILES}
+
 AURA_LABELS = ["Statisch", "Atmend", "Farbzyklus", "Stroboskop"]
 SLASH_BRIGHT = list(hw.SLASH_BRIGHTNESS)
 
@@ -121,18 +123,11 @@ class MainPanel(Gtk.Box):
             t = Tile(text, ic, acc)
             t.set_tooltip_text(tip)
             t.connect("clicked", lambda _b, g=gid: self.ctl.set_gpu(g))
-            if not self.ctl.gpu_allowed(gid):
-                t.set_sensitive(False)
-                if gid == "ultimate" and not hw.armoury_attr("gpu_mux_mode"):
-                    why = "Dieses Modell hat keinen MUX-Schalter."
-                else:
-                    why = ("NVIDIA-Treiber ist nicht geladen oder per Kernel-Parameter "
-                           "(module_blacklist) deaktiviert – nur Eco ist sicher.")
-                t.set_tooltip_text(tip + "\n\nGesperrt: " + why)
             self.gpu_tiles[gid] = t
             tiles.append(t)
         p.append(tiles)
         self.append(p)
+        self.refresh_gpu()
 
     def refresh_gpu(self, busy_target=None):
         if not self.gpu_tiles:
@@ -145,7 +140,16 @@ class MainPanel(Gtk.Box):
             else:
                 t.set_active(g == hwmode and pref != "optimized")
             t.set_busy(g == busy_target)
+            # Sperren live prüfen: der NVIDIA-Treiber kann zur Laufzeit geladen/entladen werden
+            why = self.ctl.gpu_block_reason(g)
+            t.set_sensitive(why is None and not busy_target)
+            tip = GPU_TIPS[g]
+            t.set_tooltip_text(tip + ("\n\nGesperrt: " + why if why else ""))
         txt = "Wechseln …" if busy_target else self.ctl.gpu_label()
+        pending = self.ctl.gpu_pending
+        if pending and not busy_target:
+            from .controller import GPU_LABELS
+            txt += f" → {GPU_LABELS.get(pending, pending)} (nach Abmelden)"
         self.gpu_title.set_label(f"GPU Modus: {txt}")
 
     # =========================================================== panelScreen

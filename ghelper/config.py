@@ -95,6 +95,7 @@ DEFAULTS = {
     "mode_order": ["quiet", "balanced", "turbo"],
     "modes": _default_modes(),
     "gpu_pref": "",                 # eco | standard | ultimate | optimized ("" = nur Hardware anzeigen)
+    "ultimate_enabled": False,      # Ultimativ (MUX) bewusst deaktiviert → Button grau
     "optimized_ac_target": "standard",
     "screen_mode": "max",           # auto | min | max (niedrigste / höchste Rate des Panels)
     "dim": 100,

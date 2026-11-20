@@ -75,6 +75,8 @@ class GHelperApp(Adw.Application):
         ctl.toast = self.toast
         ctl.osd = self.osd
         ctl.ask_reboot = self.ask_reboot
+        ctl.ask_logout = self.ask_logout
+        ctl.ask_kill_apps = self.ask_kill_apps
 
         win = Adw.ApplicationWindow(application=self, resizable=False)
         win.add_css_class("ghelper")
@@ -178,6 +180,34 @@ class GHelperApp(Adw.Application):
             if r == "reboot":
                 subprocess.Popen(["systemctl", "reboot"])
         dlg.connect("response", resp)
+        self.window.present()
+        dlg.present(self.window)
+
+    def ask_kill_apps(self, names, on_confirm):
+        """Wie G-Helper „Alle Anwendungen auf der dGPU beim Wechsel in den Eco Modus beenden“."""
+        dlg = Adw.AlertDialog(heading="Eco Modus",
+                              body="Die GPU wird gerade verwendet von:\n\n" + "\n".join(names) +
+                                   "\n\nDiese Programme beenden und auf Eco umschalten?")
+        dlg.add_response("cancel", "Abbrechen")
+        dlg.add_response("kill", "Beenden und umschalten")
+        dlg.set_response_appearance("kill", Adw.ResponseAppearance.DESTRUCTIVE)
+        dlg.set_default_response("cancel")
+        dlg.connect("response", lambda d, r: on_confirm() if r == "kill" else None)
+        self.window.present()
+        dlg.present(self.window)
+
+    def ask_logout(self, msg):
+        dlg = Adw.AlertDialog(heading="Abmelden erforderlich", body=msg)
+        dlg.add_response("later", "Später")
+        dlg.add_response("logout", "Jetzt abmelden")
+        dlg.set_response_appearance("logout", Adw.ResponseAppearance.SUGGESTED)
+        dlg.set_default_response("later")
+
+        def resp(d, r):
+            if r == "logout":
+                subprocess.Popen(["gnome-session-quit", "--logout", "--no-prompt"])
+        dlg.connect("response", resp)
+        self.main.refresh_gpu()
         self.window.present()
         dlg.present(self.window)
 

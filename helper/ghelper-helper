@@ -199,6 +199,9 @@ def op_armoury(a):
         raise OpError(f"Attribut {name!r} nicht erlaubt")
     lo, hi = ARMOURY_WHITELIST[name]
     if name == "dgpu_disable" and str(a.get("value")) == "1":
+        if os.path.exists("/sys/module/nvidia"):
+            # Schreiben würde im Kernel hängen, solange Treiber/Compositor die dGPU halten
+            raise OpError("NVIDIA-Treiber ist geladen – dGPU kann nicht abgeschaltet werden")
         mux = _read(os.path.join(ARMOURY, "gpu_mux_mode", "current_value")) or _read(os.path.join(NB_WMI, "gpu_mux_mode"))
         if mux == "0":
             raise OpError("dGPU kann nicht abgeschaltet werden, solange der MUX auf dGPU steht")
@@ -610,7 +613,202 @@ def op_aura(a):
     return f"Modus {mode}, #{r:02x}{g:02x}{b:02x}" + (f", Helligkeit {brightness}" if brightness is not None else "")
 
 
+# ----------------------------------------------------------------------------
+# Eco sofort (wie G-Helper unter Windows): NVIDIA-Treiber entladen, dgpu_disable=1
+# Voraussetzung: niemand hält die Karte offen (GNOME ignoriert sie per udev-Tag).
+# ----------------------------------------------------------------------------
+NV_MODULES = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
+NV_SERVICES = ["nvidia-powerd.service", "nvidia-persistenced.service"]
+# Diese Prozesse werden NIE beendet – sie gehören zum Desktop/System
+PROTECTED = {"gnome-shell", "Xwayland", "gdm", "gdm-wayland-session", "gnome-session-binary",
+             "kwin_wayland", "kwin_x11", "plasmashell", "Xorg", "systemd", "supergfxd", "asusd"}
+
+
+def _nvidia_nodes():
+    nodes = set(glob.glob("/dev/nvidia*"))
+    for d in glob.glob("/sys/class/drm/*"):
+        if _read(os.path.join(d, "device", "vendor")) == "0x10de":
+            name = os.path.basename(d)
+            if name.startswith(("card", "renderD")) and "-" not in name:
+                nodes.add("/dev/dri/" + name)
+    return nodes
+
+
+# NVIDIA-Hilfsdienste: werden beim Eco-Wechsel ohnehin gestoppt → blockieren nicht
+NV_DAEMONS = {"nvidia-powerd", "nvidia-persistenced", "nvidia-persiste"}
+
+
+def _gpu_users():
+    """→ [(pid, uid, name)] aller Prozesse, die ein NVIDIA-Gerät offen haben (ohne NVIDIA-Dienste)."""
+    nodes, out = _nvidia_nodes(), []
+    if not nodes:
+        return out
+    for p in glob.glob("/proc/[0-9]*"):
+        pid = int(os.path.basename(p))
+        if pid == os.getpid():
+            continue
+        try:
+            fds = os.listdir(os.path.join(p, "fd"))
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(os.path.join(p, "fd", fd)) in nodes:
+                    st = os.stat(p)
+                    name = _read(os.path.join(p, "comm")) or "?"
+                    if name not in NV_DAEMONS:
+                        out.append((pid, st.st_uid, name))
+                    break
+            except OSError:
+                continue
+    return out
+
+
+def _caller_uid():
+    v = os.environ.get("PKEXEC_UID", "")
+    return int(v) if v.isdigit() else None
+
+
+def op_gpu_users(a):
+    return json.dumps([{"pid": p, "name": n, "protected": n in PROTECTED or u == 0}
+                       for p, u, n in _gpu_users()])
+
+
+def _run_quiet(cmd, timeout=20):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise OpError(f"{cmd[0]}: {e}")
+
+
+SUPERGFX_CONF = "/etc/supergfxd.conf"
+
+
+def _supergfx_set_mode(mode):
+    """supergfxd-Konfiguration angleichen, damit supergfxctl -g stimmt und der Modus den Neustart übersteht."""
+    try:
+        with open(SUPERGFX_CONF) as f:
+            conf = json.load(f)
+    except (OSError, ValueError):
+        return
+    if conf.get("mode") == mode:
+        return
+    conf["mode"] = mode
+    with open(SUPERGFX_CONF + ".tmp", "w") as f:
+        json.dump(conf, f, indent=2)
+    os.replace(SUPERGFX_CONF + ".tmp", SUPERGFX_CONF)
+
+
+class _SupergfxPaused:
+    """supergfxd während des Wechsels anhalten (sonst schaltet er dazwischen) und danach
+    mit dem neuen Modus wieder starten."""
+    def __init__(self):
+        self.was_active = False
+
+    def __enter__(self):
+        r = _run_quiet(["systemctl", "is-active", "-q", "supergfxd.service"], timeout=10)
+        self.was_active = r.returncode == 0
+        if self.was_active:
+            _run_quiet(["systemctl", "stop", "supergfxd.service"], timeout=30)
+        return self
+
+    def __exit__(self, *exc):
+        if self.was_active:
+            _run_quiet(["systemctl", "start", "--no-block", "supergfxd.service"], timeout=30)
+        return False
+
+
+def op_gpu_eco(a):
+    with _SupergfxPaused():
+        return _gpu_eco(a)
+
+
+def _gpu_eco(a):
+    import signal
+    import time
+    dg = os.path.join(ARMOURY, "dgpu_disable", "current_value")
+    if not os.path.exists(dg):
+        dg = os.path.join(NB_WMI, "dgpu_disable")
+    if not os.path.exists(dg):
+        raise OpError("dgpu_disable wird vom Kernel nicht bereitgestellt")
+    mux = _read(os.path.join(ARMOURY, "gpu_mux_mode", "current_value")) or _read(os.path.join(NB_WMI, "gpu_mux_mode"))
+    if mux == "0":
+        raise OpError("MUX steht auf Ultimativ – erst Standard + Neustart")
+    if _read(dg) == "1":
+        return "bereits Eco"
+    caller = _caller_uid()
+    # 1) gewünschte Programme beenden – nur eigene, nie geschützte
+    wanted = {int(x) for x in (a.get("kill") or []) if str(x).isdigit()}
+    users = _gpu_users()
+    for pid, uid, name in users:
+        if pid in wanted and uid == caller and uid != 0 and name not in PROTECTED:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+    deadline = time.time() + 5
+    while time.time() < deadline and any(p in wanted for p, _, _ in _gpu_users()):
+        time.sleep(0.25)
+    for pid, uid, name in _gpu_users():
+        if pid in wanted and uid == caller and uid != 0 and name not in PROTECTED:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    time.sleep(0.3)
+    left = _gpu_users()
+    if left:
+        raise OpError("BUSY:" + json.dumps(sorted({n for _, _, n in left})))
+    # 2) NVIDIA-Dienste stoppen, Treiber entladen
+    for svc in NV_SERVICES:
+        _run_quiet(["systemctl", "stop", svc], timeout=30)
+    if os.path.exists("/sys/module/nvidia"):
+        r = _run_quiet(["modprobe", "-r"] + NV_MODULES, timeout=30)
+        if os.path.exists("/sys/module/nvidia"):
+            for svc in NV_SERVICES:
+                _run_quiet(["systemctl", "start", svc])
+            raise OpError("NVIDIA-Treiber ließ sich nicht entladen: " + (r.stderr.strip() or "in Benutzung"))
+    # 3) dGPU abschalten
+    _write(dg, 1)
+    _supergfx_set_mode("Integrated")
+    return "Eco"
+
+
+def op_gpu_standard(a):
+    with _SupergfxPaused():
+        return _gpu_standard(a)
+
+
+def _gpu_standard(a):
+    import time
+    dg = os.path.join(ARMOURY, "dgpu_disable", "current_value")
+    if not os.path.exists(dg):
+        dg = os.path.join(NB_WMI, "dgpu_disable")
+    if os.path.exists(dg) and _read(dg) == "1":
+        _write(dg, 0)
+        time.sleep(1.0)
+    _write("/sys/bus/pci/rescan", 1)
+    time.sleep(1.0)
+    if not _blacklisted_nvidia():
+        r = _run_quiet(["modprobe", "nvidia_drm"], timeout=60)
+        _run_quiet(["modprobe", "nvidia_uvm"], timeout=30)
+        if not os.path.exists("/sys/module/nvidia"):
+            raise OpError("NVIDIA-Treiber ließ sich nicht laden: " + (r.stderr.strip() or "?"))
+        _run_quiet(["systemctl", "start", "--no-block", "nvidia-powerd.service"])
+    _supergfx_set_mode("Hybrid")
+    return "Standard"
+
+
+def _blacklisted_nvidia():
+    cmd = _read("/proc/cmdline") or ""
+    return any(t.startswith(("module_blacklist=", "modprobe.blacklist=")) and "nvidia" in t.split("=", 1)[1].split(",")
+               for t in cmd.split())
+
+
 OPS = {
+    "gpu_users": op_gpu_users,
+    "gpu_eco": op_gpu_eco,
+    "gpu_standard": op_gpu_standard,
     "slash": op_slash,
     "aura": op_aura,
     "platform_profile": op_platform_profile,

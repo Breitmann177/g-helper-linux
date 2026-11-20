@@ -1,5 +1,11 @@
 # G-Helper Linux
 
+<p align="center">
+  <a href="https://github.com/Breitmann177/g-helper-linux/releases/latest/download/G-Helper-Linux.tar.gz"><img src="https://img.shields.io/badge/%E2%86%93%20Download%20f%C3%BCr%20Linux-E95420?style=for-the-badge" alt="Download für Linux"></a>
+</p>
+
+<p align="center"><sub>Entpacken → im Ordner <code>./install.sh</code> ausführen (Fedora, ASUS-Laptop)</sub></p>
+
 Inoffizieller Linux-Nachbau von [G-Helper](https://github.com/seerge/g-helper) 0.291.0
 für Fedora (Wayland, GNOME/KDE). Geschrieben in Python 3, PyGObject, GTK4 und
 Libadwaita. Entwickelt auf dem ASUS ROG Zephyrus G16 GU606AP, erkennt aber die
@@ -46,8 +52,7 @@ Danach einmal ab- und wieder anmelden (für Tray-Icon und Tastenrechte).
 
 **Aktualisieren:** `cd g-helper-linux && git pull && ./install.sh`
 
-**Ohne Git:** Unter [Releases](https://github.com/Breitmann177/g-helper-linux/releases)
-das neueste Archiv laden, entpacken und darin `./install.sh` ausführen.
+**Ohne Git:** Oben auf **Download für Linux** klicken, entpacken und darin `./install.sh` ausführen.
 
 Das Skript installiert die Abhängigkeiten per dnf, den Root-Helfer, die
 Polkit-Aktion und -Regel (Gruppe `wheel` → kein Passwort; der Helfer führt nur fest eingebaute, geprüfte Operationen aus), die udev-Regel für

@@ -1,5 +1,6 @@
 """Zentrale Logik: verbindet Konfiguration, Hardware und UI (wie G-Helpers Program/Modes)."""
 import copy
+import json
 import os
 from pathlib import Path
 
@@ -33,11 +34,15 @@ class Controller:
         # → nur Eco ist sicher. AMD-dGPU oder Eco-Modus (Karte vom Bus) sind davon nicht betroffen.
         self.nvidia_ok = not hw.nvidia_blacklisted() and (not self.caps["nvidia"] or hw.nvidia_driver_loaded())
         self.gpu_busy = False
+        self._gpu_token = None
+        self.gpu_pending = None          # Modus, der beim Abmelden fertig geschaltet wird
         self.on_ac = True
         self.telemetry = self.sensors.read()
         self.toast = lambda msg: print("[toast]", msg)
         self.osd = lambda title, body="": None
         self.ask_reboot = lambda msg: None
+        self.ask_logout = lambda msg: None
+        self.ask_kill_apps = lambda names, cb: None
         self._upower = None
 
     # ------------------------------------------------------------- Ereignisse
@@ -233,77 +238,211 @@ class Controller:
 
     # ------------------------------------------------------------------- GPU
     def refresh_gpu(self, cb=None):
-        def done(mode):
-            self.gpu_hw = None if isinstance(mode, Exception) else mode
+        def done(res):
+            mode, pending = (None, None) if isinstance(res, Exception) else res
+            self.gpu_hw = mode
+            self.gpu_pending = pending if pending and pending != mode else None
             self.emit("gpu", self.gpu_hw)
             if cb:
                 cb()
-        hw.run_async(hw.gpu_mode, done)
+        hw.run_async(lambda: (hw.gpu_mode(), hw.gpu_pending_mode()), done)
 
     def gpu_label(self):
         return GPU_LABELS.get(self.gpu_hw, "–")
 
+    def gpu_block_reason(self, ui_mode):
+        """→ None, wenn der Modus wählbar ist, sonst ein Hinweistext (wird live geprüft)."""
+        if ui_mode == "ultimate":
+            if not hw.armoury_attr("gpu_mux_mode"):
+                return "Dieses Modell hat keinen MUX-Schalter."
+            if not self.cfg.data.get("ultimate_enabled", False):
+                return "Ultimativ ist deaktiviert – wird auf diesem System nicht genutzt."
+        if ui_mode in ("eco", "optimized"):
+            return None                  # Eco geht immer: sofort oder (falls der Desktop die Karte hält) beim Abmelden
+        if hw.nvidia_blacklisted():
+            return ("NVIDIA-Treiber ist per Kernel-Parameter (module_blacklist) gesperrt – "
+                    "nur Eco ist möglich.")
+        if self.caps.get("nvidia") and not hw.nvidia_driver_loaded() and self.gpu_hw != "eco":
+            return "NVIDIA-Treiber ist nicht geladen."
+        return None
+
     def gpu_allowed(self, ui_mode):
-        if ui_mode in ("ultimate",) and not hw.armoury_attr("gpu_mux_mode"):
-            return False                 # kein MUX-Schalter → kein „Nur dGPU“
-        return ui_mode == "eco" or self.nvidia_ok
+        return self.gpu_block_reason(ui_mode) is None
 
     def set_gpu(self, ui_mode, from_auto=False):
-        if not self.gpu_allowed(ui_mode):
-            self.toast("NVIDIA-Treiber ist gesperrt (module_blacklist) – nur Eco ist sicher.")
+        why = self.gpu_block_reason(ui_mode)
+        if why:
+            if from_auto:
+                print("[gpu] Auto-Umschaltung übersprungen:", why)
+            else:
+                self.toast(why)
+            self.emit("gpu", self.gpu_hw)
             return
         if ui_mode == "optimized":
             self.cfg["gpu_pref"] = "optimized"
             target = self.cfg["optimized_ac_target"] if self.on_ac else "eco"
             self.emit("gpu", self.gpu_hw)
             if target != self.gpu_hw:
-                self._switch_gpu(target)
+                self._switch_gpu(target, from_auto=from_auto)
             return
         if not from_auto:
             self.cfg["gpu_pref"] = ui_mode
         if ui_mode != self.gpu_hw:
-            self._switch_gpu(ui_mode)
+            self._switch_gpu(ui_mode, from_auto=from_auto)
         else:
             self.emit("gpu", self.gpu_hw)
 
-    def _switch_gpu(self, target):
+    def _switch_gpu(self, target, from_auto=False, force_supergfx=False):
         if self.gpu_busy:
             self.toast("GPU-Umschaltung läuft bereits …")
             return
+        if self.caps.get("nvidia") and not force_supergfx and not self.dry_run:
+            if target == "eco" and hw.nvidia_driver_loaded():
+                self._eco_now(from_auto)
+                return
+            if target == "standard" and self.gpu_hw == "eco":
+                self._standard_now()
+                return
         if self.dry_run:
             self.toast(f"[dry-run] GPU → {target}")
             return
         self.gpu_busy = True
         self.emit("gpu_busy", target)
-        if not self.nvidia_ok:
-            # Ohne NVIDIA-Treiber: Eco direkt über asus-armoury dgpu_disable (nur bei MUX = Hybrid)
-            def done_eco(res):
+        # Watchdog: Die Arbeit läuft in einem Thread/Root-Helfer. Hängt sie (z. B. im Kernel),
+        # gibt das GUI nach Ablauf frei und meldet den Fehler; ein spätes Ergebnis wird verworfen.
+        token = object()
+        self._gpu_token = token
+
+        def finish():
+            if self._gpu_token is not token:
+                return False             # schon per Timeout beendet → spätes Ergebnis ignorieren
+            self._gpu_token = None
+            GLib.source_remove(watchdog)
+            self.gpu_busy = False
+            return True
+
+        def on_timeout():
+            if self._gpu_token is token:
+                self._gpu_token = None
                 self.gpu_busy = False
-                self._report(res, "GPU")
+                self.toast(f"GPU-Umschaltung auf „{GPU_LABELS[target]}“ hat nach "
+                           f"{hw.GPU_SWITCH_TIMEOUT} s nicht reagiert und wurde abgebrochen.")
                 self.refresh_gpu()
+            return False
+
+        watchdog = GLib.timeout_add_seconds(hw.GPU_SWITCH_TIMEOUT + 5, on_timeout)
+
+        if not hw.nvidia_driver_loaded():
+            # Ohne NVIDIA-Treiber: Eco direkt über asus-armoury dgpu_disable (nur bei MUX = Hybrid)
             mux = hw.armoury_attr("gpu_mux_mode")
             if target != "eco" or (mux and mux["current"] == 0):
-                self.gpu_busy = False
+                finish()
                 self.toast("Ohne NVIDIA-Treiber ist nur Eco möglich (MUX muss auf Hybrid stehen).")
                 self.refresh_gpu()
                 return
+
+            def done_eco(res):
+                if not finish():
+                    return
+                if self._report(res, "GPU"):
+                    def check():
+                        if self.gpu_hw != "eco":
+                            self.toast("GPU: dgpu_disable wurde nicht übernommen – dGPU ist noch aktiv.")
+                    self.refresh_gpu(check)
+                else:
+                    self.refresh_gpu()
             self.helper.submit([{"op": "armoury", "name": "dgpu_disable", "value": 1}], done_eco)
             return
 
         def done(res):
-            self.gpu_busy = False
+            if not finish():
+                return
             if isinstance(res, Exception):
                 self.toast(f"GPU-Umschaltung fehlgeschlagen: {res}")
             else:
-                ok, msg, reboot = res
+                ok, msg, reboot, logout = res
                 if not ok:
                     self.toast(f"GPU: {msg}")
+                elif logout:
+                    # supergfxd schaltet, sobald die Desktop-Sitzung die dGPU freigibt
+                    self.gpu_pending = target
+                    self.ask_logout("GPU Modus „%s“ ist vorgemerkt. Er wird beim Abmelden "
+                                    "aktiv, weil der Desktop die NVIDIA-Karte gerade benutzt."
+                                    % GPU_LABELS[target])
                 elif reboot or target == "ultimate" or self.gpu_hw == "ultimate":
                     self.ask_reboot("Für den GPU-Modus „%s“ ist ein Neustart erforderlich." % GPU_LABELS[target])
                 elif msg:
                     self.osd("GPU Modus", GPU_LABELS[target])
             self.refresh_gpu()
         hw.run_async(hw.set_gpu_mode, done, target)
+
+    # -- Eco sofort (wie unter Windows) ------------------------------------
+    def _eco_now(self, from_auto=False, kill=None):
+        """dGPU sofort abschalten. Hält der Desktop die Karte, fällt es auf „beim Abmelden“ zurück."""
+        self.gpu_busy = True
+        self.emit("gpu_busy", "eco")
+
+        def got_users(res):
+            r = res[0] if res else {}
+            try:
+                users = json.loads(r.get("msg") or "[]") if r.get("ok") else None
+            except ValueError:
+                users = None
+            if users is None:
+                self.gpu_busy = False
+                self.toast(f"GPU: {r.get('msg', 'Helfer nicht erreichbar')}")
+                self.refresh_gpu()
+                return
+            users = [u for u in users if u.get("pid") != os.getpid()]
+            if any(u.get("protected") for u in users):
+                # Desktop (gnome-shell/Xwayland) hält die Karte → supergfxd schaltet beim Abmelden
+                self.gpu_busy = False
+                if from_auto:
+                    print("[gpu] Eco übersprungen: Desktop nutzt die dGPU")
+                    self.refresh_gpu()
+                    return
+                self._switch_gpu("eco", force_supergfx=True)
+                return
+            if users and kill is None:
+                self.gpu_busy = False
+                self.refresh_gpu()
+                if from_auto:
+                    print("[gpu] Eco übersprungen: Programme nutzen die dGPU:", [u["name"] for u in users])
+                    return
+                names = sorted({u["name"] for u in users})
+                self.ask_kill_apps(names, lambda: self._eco_now(kill=[u["pid"] for u in users]))
+                return
+            self.helper.submit([{"op": "gpu_eco", "kill": kill or []}], done)
+
+        def done(res):
+            self.gpu_busy = False
+            r = res[0] if res else {}
+            if r.get("ok"):
+                self.gpu_pending = None
+                self.osd("GPU Modus", GPU_LABELS["eco"])
+            else:
+                msg = r.get("msg", "")
+                if msg.startswith("BUSY:"):
+                    try:
+                        names = ", ".join(json.loads(msg[5:]))
+                    except ValueError:
+                        names = msg[5:]
+                    self.toast(f"Eco nicht möglich – die dGPU wird noch benutzt von: {names}")
+                else:
+                    self.toast(f"GPU: {msg}")
+            self.refresh_gpu()
+        self.helper.submit([{"op": "gpu_users"}], got_users)
+
+    def _standard_now(self):
+        self.gpu_busy = True
+        self.emit("gpu_busy", "standard")
+
+        def done(res):
+            self.gpu_busy = False
+            if self._report(res, "GPU"):
+                self.osd("GPU Modus", GPU_LABELS["standard"])
+            self.refresh_gpu()
+        self.helper.submit([{"op": "gpu_standard"}], done)
 
     # ------------------------------------------------------------ Bildschirm
     def set_screen(self, mode):
@@ -552,6 +691,11 @@ class Controller:
             self.apply_slash()
         self.telemetry = t = self.sensors.read()
         self.poll_power(t.on_ac)
+        blocked = hw.eco_blocked()        # nur ein stat() – NVIDIA-Treiber geladen/entladen?
+        if blocked != getattr(self, "_eco_blocked", None):
+            self._eco_blocked = blocked
+            if not self.gpu_busy:
+                self.emit("gpu", self.gpu_hw)
         self.emit("telemetry", t)
         return True
 
