@@ -685,7 +685,13 @@ SUPERGFX_CONF = "/etc/supergfxd.conf"
 
 
 def _supergfx_set_mode(mode):
-    """supergfxd-Konfiguration angleichen, damit supergfxctl -g stimmt und der Modus den Neustart übersteht."""
+    """supergfxd-Konfiguration setzen.
+
+    Für Eco/Standard immer „Hybrid“: Eco übersteht den Neustart ohnehin über dgpu_disable=1
+    (wird in der Firmware gespeichert). Steht supergfxd dagegen auf „Integrated“, während die
+    Karte an ist (z. B. nach einem abgebrochenen Wechsel), versucht er beim Booten den
+    NVIDIA-Treiber zu entladen, während der Desktop ihn benutzt. Dann hängt „rmmod nvidia“
+    im Kernel fest, die GPU ist tot und auch Herunterfahren hängt minutenlang."""
     try:
         with open(SUPERGFX_CONF) as f:
             conf = json.load(f)
@@ -720,6 +726,7 @@ class _SupergfxPaused:
 
 def op_gpu_eco(a):
     with _SupergfxPaused():
+        _supergfx_set_mode("Hybrid")    # vorab: auch ein Fehler mittendrin lässt nie „Integrated“ zurück
         return _gpu_eco(a)
 
 
@@ -770,12 +777,12 @@ def _gpu_eco(a):
             raise OpError("NVIDIA-Treiber ließ sich nicht entladen: " + (r.stderr.strip() or "in Benutzung"))
     # 3) dGPU abschalten
     _write(dg, 1)
-    _supergfx_set_mode("Integrated")
     return "Eco"
 
 
 def op_gpu_standard(a):
     with _SupergfxPaused():
+        _supergfx_set_mode("Hybrid")    # vorab, nicht erst am Ende (sonst bleibt bei Fehler „Integrated“)
         return _gpu_standard(a)
 
 
@@ -795,7 +802,6 @@ def _gpu_standard(a):
         if not os.path.exists("/sys/module/nvidia"):
             raise OpError("NVIDIA-Treiber ließ sich nicht laden: " + (r.stderr.strip() or "?"))
         _run_quiet(["systemctl", "start", "--no-block", "nvidia-powerd.service"])
-    _supergfx_set_mode("Hybrid")
     return "Standard"
 
 
